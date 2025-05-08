@@ -5,10 +5,13 @@ import com.bgsoftware.superiorskyblock.api.events.IslandSetHomeEvent;
 import com.bgsoftware.superiorskyblock.api.island.Island;
 import com.bgsoftware.superiorskyblock.api.island.IslandPrivilege;
 import com.bgsoftware.superiorskyblock.api.wrappers.SuperiorPlayer;
-import com.bgsoftware.superiorskyblock.core.messages.Message;
 import com.bgsoftware.superiorskyblock.commands.IPermissibleCommand;
+import com.bgsoftware.superiorskyblock.core.ObjectsPools;
+import com.bgsoftware.superiorskyblock.core.events.args.PluginEventArgs;
+import com.bgsoftware.superiorskyblock.core.events.plugin.PluginEvent;
+import com.bgsoftware.superiorskyblock.core.events.plugin.PluginEventsFactory;
+import com.bgsoftware.superiorskyblock.core.messages.Message;
 import com.bgsoftware.superiorskyblock.island.privilege.IslandPrivileges;
-import com.bgsoftware.superiorskyblock.core.events.EventResult;
 import org.bukkit.Location;
 
 import java.util.Arrays;
@@ -63,20 +66,23 @@ public class CmdSetTeleport implements IPermissibleCommand {
 
     @Override
     public void execute(SuperiorSkyblockPlugin plugin, SuperiorPlayer superiorPlayer, Island island, String[] args) {
-        Location newLocation = superiorPlayer.getLocation();
+        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+            Location newLocation = superiorPlayer.getLocation(wrapper.getHandle());
 
-        if (!island.isInsideRange(newLocation)) {
-            Message.TELEPORT_LOCATION_OUTSIDE_ISLAND.send(superiorPlayer);
-            return;
+            if (!island.isInsideRange(newLocation)) {
+                Message.TELEPORT_LOCATION_OUTSIDE_ISLAND.send(superiorPlayer);
+                return;
+            }
+
+            PluginEvent<PluginEventArgs.IslandSetHome> event = PluginEventsFactory.callIslandSetHomeEvent(
+                    island, superiorPlayer, newLocation, IslandSetHomeEvent.Reason.SET_HOME_COMMAND);
+
+            if (event.isCancelled())
+                return;
+
+            island.setIslandHome(event.getArgs().islandHome);
         }
 
-        EventResult<Location> eventResult = plugin.getEventsBus().callIslandSetHomeEvent(island, newLocation,
-                IslandSetHomeEvent.Reason.SET_HOME_COMMAND, superiorPlayer);
-
-        if (eventResult.isCancelled())
-            return;
-
-        island.setIslandHome(eventResult.getResult());
         Message.CHANGED_TELEPORT_LOCATION.send(superiorPlayer);
     }
 

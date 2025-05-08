@@ -1,7 +1,6 @@
 package com.bgsoftware.superiorskyblock.listener;
 
 import com.bgsoftware.common.annotations.Nullable;
-import com.bgsoftware.common.reflection.ReflectMethod;
 import com.bgsoftware.superiorskyblock.SuperiorSkyblockPlugin;
 import com.bgsoftware.superiorskyblock.api.key.Key;
 import com.bgsoftware.superiorskyblock.api.key.KeyMap;
@@ -10,18 +9,20 @@ import com.bgsoftware.superiorskyblock.api.service.world.WorldRecordService;
 import com.bgsoftware.superiorskyblock.core.EnumHelper;
 import com.bgsoftware.superiorskyblock.core.LazyReference;
 import com.bgsoftware.superiorskyblock.core.Materials;
+import com.bgsoftware.superiorskyblock.core.ObjectsPools;
 import com.bgsoftware.superiorskyblock.core.PlayerHand;
-import com.bgsoftware.superiorskyblock.core.ServerVersion;
 import com.bgsoftware.superiorskyblock.core.collections.AutoRemovalCollection;
 import com.bgsoftware.superiorskyblock.core.key.ConstantKeys;
 import com.bgsoftware.superiorskyblock.core.key.KeyIndicator;
-import com.bgsoftware.superiorskyblock.core.key.KeyMaps;
 import com.bgsoftware.superiorskyblock.core.key.Keys;
+import com.bgsoftware.superiorskyblock.core.key.map.KeyMaps;
 import com.bgsoftware.superiorskyblock.core.threads.BukkitExecutor;
 import com.bgsoftware.superiorskyblock.nms.bridge.PistonPushReaction;
+import com.bgsoftware.superiorskyblock.platform.event.GameEvent;
+import com.bgsoftware.superiorskyblock.platform.event.GameEventPriority;
+import com.bgsoftware.superiorskyblock.platform.event.GameEventType;
+import com.bgsoftware.superiorskyblock.platform.event.args.GameEventArgs;
 import com.bgsoftware.superiorskyblock.world.BukkitEntities;
-import com.bgsoftware.superiorskyblock.world.BukkitItems;
-import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -30,47 +31,25 @@ import org.bukkit.block.BlockState;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.FallingBlock;
+import org.bukkit.entity.Item;
 import org.bukkit.entity.Minecart;
+import org.bukkit.entity.Player;
 import org.bukkit.entity.TNTPrimed;
-import org.bukkit.event.EventHandler;
-import org.bukkit.event.EventPriority;
-import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
-import org.bukkit.event.block.BlockBreakEvent;
-import org.bukkit.event.block.BlockDispenseEvent;
-import org.bukkit.event.block.BlockFormEvent;
-import org.bukkit.event.block.BlockFromToEvent;
-import org.bukkit.event.block.BlockGrowEvent;
-import org.bukkit.event.block.BlockPistonExtendEvent;
-import org.bukkit.event.block.BlockPlaceEvent;
-import org.bukkit.event.block.BlockSpreadEvent;
-import org.bukkit.event.block.LeavesDecayEvent;
-import org.bukkit.event.entity.EntityChangeBlockEvent;
-import org.bukkit.event.entity.EntityDeathEvent;
-import org.bukkit.event.entity.EntityExplodeEvent;
-import org.bukkit.event.entity.ItemSpawnEvent;
-import org.bukkit.event.entity.ProjectileHitEvent;
-import org.bukkit.event.player.PlayerBucketEmptyEvent;
-import org.bukkit.event.player.PlayerBucketFillEvent;
-import org.bukkit.event.player.PlayerInteractEvent;
-import org.bukkit.event.vehicle.VehicleDestroyEvent;
-import org.bukkit.event.world.StructureGrowEvent;
 import org.bukkit.inventory.ItemStack;
-import org.bukkit.material.Directional;
-import org.bukkit.material.MaterialData;
 import org.bukkit.metadata.FixedMetadataValue;
 
 import java.util.Collection;
 import java.util.concurrent.TimeUnit;
 
-public class BlockChangesListener implements Listener {
+public class BlockChangesListener extends AbstractGameEventListener {
 
-    private static final ReflectMethod<Block> PROJECTILE_HIT_EVENT_TARGET_BLOCK = new ReflectMethod<>(
-            ProjectileHitEvent.class, "getHitBlock");
     @Nullable
     private static final Material CHORUS_FLOWER = EnumHelper.getEnum(Material.class, "CHORUS_FLOWER");
     @Nullable
     private static final EntityType WIND_CHARGE = EnumHelper.getEnum(EntityType.class, "WIND_CHARGE");
+    @Nullable
+    private static final EntityType BREEZE_WIND_CHARGE = EnumHelper.getEnum(EntityType.class, "BREEZE_WIND_CHARGE");
     @Nullable
     private static final Material POINTED_DRIPSTONE = EnumHelper.getEnum(Material.class, "POINTED_DRIPSTONE");
 
@@ -79,43 +58,52 @@ public class BlockChangesListener implements Listener {
     @WorldRecordFlags
     private static final int ALL_RECORD_FLAGS = REGULAR_RECORD_FLAGS | WorldRecordFlags.HANDLE_NEARBY_BLOCKS;
 
+    private final Collection<Location> alreadySpongeAbosrbCalled = AutoRemovalCollection.newArrayList(5L * 50, TimeUnit.MILLISECONDS);
+
     private final LazyReference<WorldRecordService> worldRecordService = new LazyReference<WorldRecordService>() {
         @Override
         protected WorldRecordService create() {
             return plugin.getServices().getService(WorldRecordService.class);
         }
     };
-    private final SuperiorSkyblockPlugin plugin;
 
     public BlockChangesListener(SuperiorSkyblockPlugin plugin) {
-        this.plugin = plugin;
-        this.registerSpongeListener();
-        this.registerBlockDestroyListener();
+        super(plugin);
+        this.registerListeners();
     }
 
     /* BLOCK PLACES */
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onBlockPlace(BlockPlaceEvent e) {
-        boolean shouldAvoidReplacedState = e.getBlockReplacedState().equals(e.getBlock().getState());
-        this.worldRecordService.get().recordBlockPlace(Keys.of(e.getBlock()),
-                e.getBlock().getLocation(), plugin.getNMSWorld().getDefaultAmount(e.getBlock()),
-                shouldAvoidReplacedState ? null : e.getBlockReplacedState(),
-                REGULAR_RECORD_FLAGS);
+    private void onBlockPlace(GameEvent<GameEventArgs.BlockPlaceEvent> e) {
+        Block block = e.getArgs().block;
+        BlockState replacedState = e.getArgs().replacedState;
+
+        boolean shouldAvoidReplacedState = replacedState.equals(block.getState());
+        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+            this.worldRecordService.get().recordBlockPlace(Keys.of(block),
+                    block.getLocation(wrapper.getHandle()),
+                    plugin.getNMSWorld().getDefaultAmount(block),
+                    shouldAvoidReplacedState ? null : replacedState,
+                    REGULAR_RECORD_FLAGS);
+        }
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onBucketEmpty(PlayerBucketEmptyEvent e) {
-        Key blockKey = Keys.ofMaterialAndData(e.getBucket().name().replace("_BUCKET", ""));
-        this.worldRecordService.get().recordBlockPlace(blockKey, e.getBlockClicked().getLocation(), 1,
-                null, REGULAR_RECORD_FLAGS);
+    private void onBucketEmpty(GameEvent<GameEventArgs.PlayerEmptyBucketEvent> e) {
+        Material bucket = e.getArgs().bucket;
+
+        Key blockKey = Keys.ofMaterialAndData(bucket.name().replace("_BUCKET", ""));
+        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+            Block clickedBlock = e.getArgs().clickedBlock;
+            this.worldRecordService.get().recordBlockPlace(blockKey,
+                    clickedBlock.getLocation(wrapper.getHandle()), 1,
+                    null, REGULAR_RECORD_FLAGS);
+        }
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onStructureGrow(StructureGrowEvent e) {
+    private void onStructureGrow(GameEvent<GameEventArgs.StructureGrowEvent> e) {
         KeyMap<Integer> placedBlockCounts = KeyMaps.createArrayMap(KeyIndicator.MATERIAL);
         KeyMap<Integer> brokenBlockCounts = KeyMaps.createArrayMap(KeyIndicator.MATERIAL);
-        e.getBlocks().forEach(blockState -> {
+        e.getArgs().blocks.forEach(blockState -> {
             Key placedBlockKey = Keys.of(blockState);
             Key brokenBlockKey = Keys.of(blockState.getBlock());
             if (!placedBlockKey.equals(brokenBlockKey)) {
@@ -125,65 +113,68 @@ public class BlockChangesListener implements Listener {
                     brokenBlockCounts.put(brokenBlockKey, brokenBlockCounts.getOrDefault(brokenBlockKey, 0) + 1);
             }
         });
-        this.worldRecordService.get().recordMultiBlocksPlace(placedBlockCounts, e.getLocation(), WorldRecordFlags.DIRTY_CHUNKS);
-        this.worldRecordService.get().recordMultiBlocksBreak(brokenBlockCounts, e.getLocation(), WorldRecordFlags.DIRTY_CHUNKS);
+        Location growLocation = e.getArgs().location;
+        this.worldRecordService.get().recordMultiBlocksPlace(placedBlockCounts, growLocation, WorldRecordFlags.DIRTY_CHUNKS);
+        this.worldRecordService.get().recordMultiBlocksBreak(brokenBlockCounts, growLocation, WorldRecordFlags.DIRTY_CHUNKS);
     }
 
-    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
-    private void onBlockGrow(BlockGrowEvent e) {
-        this.worldRecordService.get().recordBlockPlace(Keys.of(e.getNewState()), e.getBlock().getLocation(),
-                1, null, REGULAR_RECORD_FLAGS);
+    private void onBlockGrow(GameEvent<GameEventArgs.BlockGrowEvent> e) {
+        Block block = e.getArgs().block;
+        BlockState newState = e.getArgs().newState;
+
+        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+            this.worldRecordService.get().recordBlockPlace(Keys.of(newState),
+                    block.getLocation(wrapper.getHandle()),
+                    1, block.getState(), REGULAR_RECORD_FLAGS);
+        }
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onBlockFrom(BlockFormEvent e) {
-        Location location = e.getNewState().getLocation();
-        // Do not save block counts
-        this.worldRecordService.get().recordBlockBreak(Keys.of(e.getBlock()), location, 1, WorldRecordFlags.DIRTY_CHUNKS);
+    private void onBlockForm(GameEvent<GameEventArgs.BlockFormEvent> e) {
+        Block block = e.getArgs().block;
+        BlockState newState = e.getArgs().newState;
+
+        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+            Location location = newState.getLocation(wrapper.getHandle());
+            // Do not save block counts
+            this.worldRecordService.get().recordBlockBreak(Keys.of(block), location, 1, WorldRecordFlags.DIRTY_CHUNKS);
+        }
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onPlayerInteract(PlayerInteractEvent e) {
-        onMinecartPlace(e);
-        onSpawnerChange(e);
+    private void onBlockSpread(GameEvent<GameEventArgs.BlockSpreadEvent> e) {
+        Block block = e.getArgs().block;
+        BlockState newState = e.getArgs().newState;
+
+        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+            this.worldRecordService.get().recordBlockPlace(Keys.of(newState),
+                    block.getLocation(wrapper.getHandle()),
+                    1, block.getState(), REGULAR_RECORD_FLAGS);
+        }
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    public void onBlockSpread(BlockSpreadEvent e) {
-        this.worldRecordService.get().recordBlockPlace(Keys.of(e.getNewState()), e.getBlock().getLocation(),
-                1, e.getBlock().getState(), REGULAR_RECORD_FLAGS);
-    }
+    private void onMinecartPlace(GameEvent<GameEventArgs.EntitySpawnEvent> e) {
+        Entity vehicle = e.getArgs().entity;
 
-    private void onMinecartPlace(PlayerInteractEvent e) {
-        if (e.getAction() != Action.RIGHT_CLICK_BLOCK || !Materials.isRail(e.getClickedBlock().getType()))
+        if (!(vehicle instanceof Minecart))
             return;
 
-        PlayerHand playerHand = BukkitItems.getHand(e);
-        if (playerHand != PlayerHand.MAIN_HAND)
-            return;
-
-        ItemStack handItem = BukkitItems.getHandItem(e.getPlayer(), playerHand);
-
-        if (handItem == null)
-            return;
-
-        Material handItemType = handItem.getType();
-        if (!Materials.isMinecart(handItemType))
-            return;
-
-        Key minecartBlockKey = getMinecartBlockKey(handItemType);
-        if (minecartBlockKey != null)
-            this.worldRecordService.get().recordBlockPlace(minecartBlockKey, e.getClickedBlock().getLocation(),
-                    1, null, REGULAR_RECORD_FLAGS);
+        Key minecartBlockKey = getMinecartBlockKey(vehicle.getType());
+        if (minecartBlockKey != null) {
+            try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+                this.worldRecordService.get().recordBlockPlace(minecartBlockKey,
+                        vehicle.getLocation(wrapper.getHandle()),
+                        1, null, REGULAR_RECORD_FLAGS);
+            }
+        }
     }
 
-    private void onSpawnerChange(PlayerInteractEvent e) {
-        if (e.getAction() != Action.RIGHT_CLICK_BLOCK ||
-                e.getClickedBlock().getType() != Materials.SPAWNER.toBukkitType())
+    private void onSpawnerChange(GameEvent<GameEventArgs.PlayerInteractEvent> e) {
+        Action action = e.getArgs().action;
+        Block clickedBlock = e.getArgs().clickedBlock;
+
+        if (action != Action.RIGHT_CLICK_BLOCK || clickedBlock.getType() != Materials.SPAWNER.toBukkitType())
             return;
 
-        PlayerHand playerHand = BukkitItems.getHand(e);
-        ItemStack handItem = BukkitItems.getHandItem(e.getPlayer(), playerHand);
+        ItemStack handItem = e.getArgs().usedItem;
 
         if (handItem == null)
             return;
@@ -192,144 +183,123 @@ public class BlockChangesListener implements Listener {
         if (!Materials.isSpawnEgg(handItemType))
             return;
 
-        Block block = e.getClickedBlock();
-        Chunk chunk = block.getChunk();
-        BlockState oldBlockState = block.getState();
+        Chunk chunk = clickedBlock.getChunk();
+        BlockState oldBlockState = clickedBlock.getState();
         Key oldSpawnerKey = Keys.of(oldBlockState);
 
         BukkitExecutor.sync(() -> {
             if (!chunk.isLoaded())
                 return;
 
-            Key newSpawnerKey = Keys.of(block);
+            Key newSpawnerKey = Keys.of(clickedBlock);
             if (!oldSpawnerKey.equals(newSpawnerKey)) {
-                this.worldRecordService.get().recordBlockPlace(newSpawnerKey, block.getLocation(),
-                        1, oldBlockState, REGULAR_RECORD_FLAGS);
+                try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+                    this.worldRecordService.get().recordBlockPlace(newSpawnerKey, clickedBlock.getLocation(wrapper.getHandle()),
+                            1, oldBlockState, REGULAR_RECORD_FLAGS);
+                }
             }
         }, 1L);
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onMinecartPlaceByDispenser(BlockDispenseEvent e) {
-        Material dispenseItemType = e.getItem().getType();
+    private void onEntityChangeBlock(GameEvent<GameEventArgs.EntityChangeBlockEvent> e) {
+        Key blockKey = e.getArgs().newType;
+        Block block = e.getArgs().block;
 
-        if (!Materials.isMinecart(dispenseItemType) || e.getBlock().getType() != Material.DISPENSER)
-            return;
-
-        Block targetBlock = null;
-
-        if (ServerVersion.isLegacy()) {
-            MaterialData materialData = e.getBlock().getState().getData();
-            if (materialData instanceof Directional) {
-                targetBlock = e.getBlock().getRelative(((Directional) materialData).getFacing());
-            }
-        } else {
-            Object blockData = plugin.getNMSWorld().getBlockData(e.getBlock());
-            if (blockData instanceof org.bukkit.block.data.Directional) {
-                targetBlock = e.getBlock().getRelative(((org.bukkit.block.data.Directional) blockData).getFacing());
-            }
+        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+            this.worldRecordService.get().recordBlockPlace(blockKey, block.getLocation(wrapper.getHandle()), 1,
+                    block.getState(), WorldRecordFlags.SAVE_BLOCK_COUNT);
         }
-
-        if (targetBlock == null)
-            return;
-
-        if (!Materials.isRail(targetBlock.getType()))
-            return;
-
-        Key minecartBlockKey = getMinecartBlockKey(dispenseItemType);
-        if (minecartBlockKey != null)
-            this.worldRecordService.get().recordBlockPlace(minecartBlockKey, targetBlock.getLocation(),
-                    1, null, REGULAR_RECORD_FLAGS);
-    }
-
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onEntityChangeBlock(EntityChangeBlockEvent e) {
-        Key blockKey;
-
-        if (ServerVersion.isLegacy()) {
-            // noinspection deprecated
-            blockKey = Keys.of(e.getTo(), e.getData());
-        } else {
-            blockKey = Keys.of(e.getTo(), (byte) 0);
-        }
-
-        this.worldRecordService.get().recordBlockPlace(blockKey, e.getBlock().getLocation(), 1,
-                e.getBlock().getState(), WorldRecordFlags.SAVE_BLOCK_COUNT);
     }
 
     /* BLOCK BREAKS */
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onBlockBreak(BlockBreakEvent e) {
-        this.worldRecordService.get().recordBlockBreak(e.getBlock(), ALL_RECORD_FLAGS);
+    private void onBlockBreak(GameEvent<GameEventArgs.BlockBreakEvent> e) {
+        this.worldRecordService.get().recordBlockBreak(e.getArgs().block, ALL_RECORD_FLAGS);
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onEntityBlockDeath(EntityDeathEvent e) {
-        if (e.getEntity() instanceof FallingBlock) {
-            Key blockKey = plugin.getNMSAlgorithms().getFallingBlockType((FallingBlock) e.getEntity());
-            this.worldRecordService.get().recordBlockBreak(blockKey, e.getEntity().getLocation(),
-                    1, REGULAR_RECORD_FLAGS);
+    private void onBlockDestroy(GameEvent<GameEventArgs.BlockDestroyEvent> e) {
+        this.worldRecordService.get().recordBlockBreak(e.getArgs().block, WorldRecordFlags.DIRTY_CHUNKS);
+    }
+
+    private void onEntityBlockDeath(GameEvent<GameEventArgs.EntityDeathEvent> e) {
+        Entity entity = e.getArgs().entity;
+        if (entity instanceof FallingBlock) {
+            Key blockKey = plugin.getNMSAlgorithms().getFallingBlockType((FallingBlock) entity);
+            try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+                this.worldRecordService.get().recordBlockBreak(blockKey, entity.getLocation(wrapper.getHandle()),
+                        1, REGULAR_RECORD_FLAGS);
+            }
         }
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onBucketFill(PlayerBucketFillEvent e) {
-        boolean isWaterLogged = plugin.getNMSWorld().isWaterLogged(e.getBlockClicked());
-        if (isWaterLogged || e.getBlockClicked().isLiquid()) {
-            Key blockKey = isWaterLogged ? ConstantKeys.WATER : Keys.of(e.getBlockClicked());
-            this.worldRecordService.get().recordBlockBreak(blockKey, e.getBlockClicked().getLocation(),
-                    1, REGULAR_RECORD_FLAGS);
+    private void onBucketFill(GameEvent<GameEventArgs.PlayerFillBucketEvent> e) {
+        Block clickedBlock = e.getArgs().clickedBlock;
+
+        boolean isWaterLogged = plugin.getNMSWorld().isWaterLogged(clickedBlock);
+        if (isWaterLogged || clickedBlock.isLiquid()) {
+            Key blockKey = isWaterLogged ? ConstantKeys.WATER : Keys.of(clickedBlock);
+            try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+                this.worldRecordService.get().recordBlockBreak(blockKey,
+                        clickedBlock.getLocation(wrapper.getHandle()),
+                        1, REGULAR_RECORD_FLAGS);
+            }
         }
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onDragonEggDrop(ItemSpawnEvent e) {
-        if (e.getEntity().getItemStack().getType() == Material.DRAGON_EGG) {
-            for (Entity nearby : e.getEntity().getNearbyEntities(2, 2, 2)) {
-                if (nearby instanceof FallingBlock) {
-                    Key blockKey = plugin.getNMSAlgorithms().getFallingBlockType((FallingBlock) nearby);
-                    this.worldRecordService.get().recordBlockBreak(blockKey, nearby.getLocation(),
-                            1, WorldRecordFlags.SAVE_BLOCK_COUNT);
-                    return;
+    private void onDragonEggDrop(GameEvent<GameEventArgs.EntitySpawnEvent> e) {
+        if (!(e.getArgs().entity instanceof Item))
+            return;
+
+        Item item = (Item) e.getArgs().entity;
+
+        if (item.getItemStack().getType() == Material.DRAGON_EGG) {
+            try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+                for (Entity nearby : item.getNearbyEntities(2, 2, 2)) {
+                    if (nearby instanceof FallingBlock) {
+                        Key blockKey = plugin.getNMSAlgorithms().getFallingBlockType((FallingBlock) nearby);
+                        this.worldRecordService.get().recordBlockBreak(blockKey, nearby.getLocation(wrapper.getHandle()),
+                                1, WorldRecordFlags.SAVE_BLOCK_COUNT);
+                        return;
+                    }
                 }
             }
         }
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onPistonExtend(BlockPistonExtendEvent e) {
-        for (Block block : e.getBlocks()) {
+    private void onPistonExtend(GameEvent<GameEventArgs.PistonExtendEvent> e) {
+        for (Block block : e.getArgs().blocks) {
             if (plugin.getNMSWorld().getPistonReaction(block) == PistonPushReaction.DESTROY) {
                 this.worldRecordService.get().recordBlockBreak(block, 1, REGULAR_RECORD_FLAGS);
             }
         }
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onLeavesDecay(LeavesDecayEvent e) {
-        this.worldRecordService.get().recordBlockBreak(e.getBlock(), 1, REGULAR_RECORD_FLAGS);
+    private void onLeavesDecay(GameEvent<GameEventArgs.LeavesDecayEvent> e) {
+        this.worldRecordService.get().recordBlockBreak(e.getArgs().block, 1, REGULAR_RECORD_FLAGS);
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onBlockFromTo(BlockFromToEvent e) {
-        if (e.getToBlock().getType() != Material.AIR) {
+    private void onBlockFromTo(GameEvent<GameEventArgs.BlockFromToEvent> e) {
+        Block toBlock = e.getArgs().toBlock;
+
+        if (toBlock.getType() != Material.AIR) {
             // Do not save block counts
-            this.worldRecordService.get().recordBlockBreak(e.getToBlock(), 1, WorldRecordFlags.DIRTY_CHUNKS);
+            this.worldRecordService.get().recordBlockBreak(toBlock, 1, WorldRecordFlags.DIRTY_CHUNKS);
         } else {
             BukkitExecutor.sync(() -> {
                 // Do not save block counts
-                this.worldRecordService.get().recordBlockPlace(e.getToBlock(), 1, null, WorldRecordFlags.DIRTY_CHUNKS);
+                this.worldRecordService.get().recordBlockPlace(toBlock, 1, null, WorldRecordFlags.DIRTY_CHUNKS);
             });
         }
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onEntityExplode(EntityExplodeEvent e) {
-        boolean isWindCharge = e.getEntityType() == WIND_CHARGE;
+    private void onEntityExplode(GameEvent<GameEventArgs.EntityExplodeEvent> e) {
+        Entity entity = e.getArgs().entity;
+        EntityType entityType = entity.getType();
+
+        boolean isWindCharge = entityType == WIND_CHARGE || entityType == BREEZE_WIND_CHARGE;
 
         KeyMap<Integer> blockCounts = KeyMaps.createArrayMap(KeyIndicator.MATERIAL);
-        e.blockList().forEach(block -> {
+        e.getArgs().blocks.forEach(block -> {
             Material blockType = block.getType();
             // Wind charges only break chorus flowers and pointed drip-stones
             if (isWindCharge && blockType != CHORUS_FLOWER && blockType != POINTED_DRIPSTONE)
@@ -339,102 +309,96 @@ public class BlockChangesListener implements Listener {
             blockCounts.put(blockKey, blockCounts.getOrDefault(blockKey, 0) + 1);
         });
 
-        if (e.getEntity() instanceof TNTPrimed)
+        if (entity instanceof TNTPrimed)
             blockCounts.put(ConstantKeys.TNT, blockCounts.getOrDefault(ConstantKeys.TNT, 0) + 1);
 
-        this.worldRecordService.get().recordMultiBlocksBreak(blockCounts, e.getLocation(), REGULAR_RECORD_FLAGS);
-    }
-
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onMinecartBreak(VehicleDestroyEvent e) {
-        if (e.getVehicle() instanceof Minecart) {
-            Key blockKey = plugin.getNMSAlgorithms().getMinecartBlock((Minecart) e.getVehicle());
-            this.worldRecordService.get().recordBlockBreak(blockKey, e.getVehicle().getLocation(),
-                    1, REGULAR_RECORD_FLAGS);
-            e.getVehicle().setMetadata("SSB-VehicleDestory", new FixedMetadataValue(plugin, true));
+        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+            this.worldRecordService.get().recordMultiBlocksBreak(blockCounts,
+                    entity.getLocation(wrapper.getHandle()), REGULAR_RECORD_FLAGS);
         }
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onChorusHit(ProjectileHitEvent e) {
-        if (ServerVersion.isLessThan(ServerVersion.v1_18) && PROJECTILE_HIT_EVENT_TARGET_BLOCK.isValid()) {
-            BukkitEntities.getPlayerSource(e.getEntity()).ifPresent(shooter -> {
-                Block hitBlock = PROJECTILE_HIT_EVENT_TARGET_BLOCK.invoke(e);
-                if (hitBlock != null && hitBlock.getType() == CHORUS_FLOWER) {
-                    this.worldRecordService.get().recordBlockBreak(hitBlock, 1, REGULAR_RECORD_FLAGS);
-                }
-            });
+    private void onMinecartBreak(GameEvent<GameEventArgs.EntityDeathEvent> e) {
+        Entity vehicle = e.getArgs().entity;
+
+        if (vehicle instanceof Minecart) {
+            Key blockKey = plugin.getNMSAlgorithms().getMinecartBlock((Minecart) vehicle);
+            try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+                this.worldRecordService.get().recordBlockBreak(blockKey, vehicle.getLocation(wrapper.getHandle()),
+                        1, REGULAR_RECORD_FLAGS);
+            }
+            vehicle.setMetadata("SSB-VehicleDestory", new FixedMetadataValue(plugin, true));
         }
     }
 
-    /* INTERNAL */
-
-    private void registerSpongeListener() {
-        try {
-            Class.forName("org.bukkit.event.block.SpongeAbsorbEvent");
-            Bukkit.getPluginManager().registerEvents(new SpongeAbsorbListener(), plugin);
-        } catch (Throwable ignored) {
-        }
+    private void onChorusHit(GameEvent<GameEventArgs.ProjectileHitEvent> e) {
+        BukkitEntities.getPlayerSource(e.getArgs().entity).ifPresent(shooter -> {
+            Block hitBlock = e.getArgs().hitBlock;
+            if (hitBlock != null && hitBlock.getType() == CHORUS_FLOWER) {
+                this.worldRecordService.get().recordBlockBreak(hitBlock, 1, REGULAR_RECORD_FLAGS);
+            }
+        });
     }
 
-    private void registerBlockDestroyListener() {
-        try {
-            Class.forName("com.destroystokyo.paper.event.block.BlockDestroyEvent");
-            Bukkit.getPluginManager().registerEvents(new BlockDestoryListener(), plugin);
-        } catch (Throwable ignored) {
-        }
-    }
-
-    @Nullable
-    private static Key getMinecartBlockKey(Material minecartType) {
-        switch (minecartType.name()) {
-            case "HOPPER_MINECART":
-                return ConstantKeys.HOPPER;
-            case "COMMAND_MINECART":
-            case "COMMAND_BLOCK_MINECART":
-                return ConstantKeys.COMMAND_BLOCK;
-            case "EXPLOSIVE_MINECART":
-            case "TNT_MINECART":
-                return ConstantKeys.TNT;
-            case "POWERED_MINECART":
-            case "FURNACE_MINECART":
-                return ConstantKeys.FURNACE;
-            case "STORAGE_MINECART":
-            case "CHEST_MINECART":
-                return ConstantKeys.CHEST;
-        }
-
-        return null;
-    }
-
-    private class SpongeAbsorbListener implements Listener {
-
-        private final Collection<Location> alreadySpongeAbosrbCalled = AutoRemovalCollection.newArrayList(5L * 50, TimeUnit.MILLISECONDS);
-
-        @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-        public void onSpongeAbsorb(org.bukkit.event.block.SpongeAbsorbEvent e) {
-            Location location = e.getBlock().getLocation();
+    private void onSpongeAbsorb(GameEvent<GameEventArgs.SpongeAbsorbEvent> e) {
+        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+            Block block = e.getArgs().block;
+            Location location = block.getLocation(wrapper.getHandle());
 
             if (alreadySpongeAbosrbCalled.contains(location))
                 return;
 
             worldRecordService.get().recordBlockPlace(ConstantKeys.WET_SPONGE, location, 1,
-                    e.getBlock().getState(), WorldRecordFlags.SAVE_BLOCK_COUNT);
-            alreadySpongeAbosrbCalled.add(location);
-        }
+                    block.getState(), WorldRecordFlags.SAVE_BLOCK_COUNT);
 
+            alreadySpongeAbosrbCalled.add(location.clone());
+        }
     }
 
-    private class BlockDestoryListener implements Listener {
+    /* INTERNAL */
 
-        @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-        public void onBlockDestroy(com.destroystokyo.paper.event.block.BlockDestroyEvent e) {
-            if (e.getNewState().getMaterial() != Material.AIR)
-                return;
+    private void registerListeners() {
+        registerCallback(GameEventType.BLOCK_PLACE_EVENT, GameEventPriority.MONITOR, this::onBlockPlace);
+        registerCallback(GameEventType.PLAYER_EMPTY_BUCKET_EVENT, GameEventPriority.MONITOR, this::onBucketEmpty);
+        registerCallback(GameEventType.STRUCTURE_GROW_EVENT, GameEventPriority.MONITOR, this::onStructureGrow);
+        registerCallback(GameEventType.BLOCK_GROW_EVENT, GameEventPriority.MONITOR, this::onBlockGrow);
+        registerCallback(GameEventType.BLOCK_FORM_EVENT, GameEventPriority.MONITOR, this::onBlockForm);
+        registerCallback(GameEventType.BLOCK_SPREAD_EVENT, GameEventPriority.MONITOR, this::onBlockSpread);
+        registerCallback(GameEventType.ENTITY_SPAWN_EVENT, GameEventPriority.MONITOR, this::onMinecartPlace);
+        registerCallback(GameEventType.PLAYER_INTERACT_EVENT, GameEventPriority.MONITOR, this::onSpawnerChange);
+        registerCallback(GameEventType.ENTITY_CHANGE_BLOCK_EVENT, GameEventPriority.MONITOR, this::onEntityChangeBlock);
+        registerCallback(GameEventType.BLOCK_BREAK_EVENT, GameEventPriority.MONITOR, this::onBlockBreak);
+        registerCallback(GameEventType.BLOCK_DESTROY_EVENT, GameEventPriority.MONITOR, this::onBlockDestroy);
+        registerCallback(GameEventType.ENTITY_DEATH_EVENT, GameEventPriority.MONITOR, this::onEntityBlockDeath);
+        registerCallback(GameEventType.PLAYER_FILL_BUCKET_EVENT, GameEventPriority.MONITOR, this::onBucketFill);
+        registerCallback(GameEventType.ENTITY_SPAWN_EVENT, GameEventPriority.MONITOR, this::onDragonEggDrop);
+        registerCallback(GameEventType.PISTON_EXTEND_EVENT, GameEventPriority.MONITOR, this::onPistonExtend);
+        registerCallback(GameEventType.LEAVES_DECAY_EVENT, GameEventPriority.MONITOR, this::onLeavesDecay);
+        registerCallback(GameEventType.BLOCK_FROM_TO_EVENT, GameEventPriority.MONITOR, this::onBlockFromTo);
+        registerCallback(GameEventType.ENTITY_EXPLODE_EVENT, GameEventPriority.MONITOR, this::onEntityExplode);
+        registerCallback(GameEventType.ENTITY_DEATH_EVENT, GameEventPriority.MONITOR, this::onMinecartBreak);
+        registerCallback(GameEventType.PROJECTILE_HIT_EVENT, GameEventPriority.MONITOR, this::onChorusHit);
+        registerCallback(GameEventType.SPONGE_ABSORB_EVENT, GameEventPriority.MONITOR, this::onSpongeAbsorb);
+    }
 
-            worldRecordService.get().recordBlockBreak(e.getBlock(), WorldRecordFlags.DIRTY_CHUNKS);
+    @Nullable
+    private static Key getMinecartBlockKey(EntityType minecartType) {
+        switch (minecartType) {
+            case MINECART_HOPPER:
+                return ConstantKeys.HOPPER;
+            case MINECART_COMMAND:
+                return ConstantKeys.COMMAND_BLOCK;
+            case MINECART_TNT:
+                return ConstantKeys.TNT;
+            case MINECART_FURNACE:
+                return ConstantKeys.FURNACE;
+            case MINECART_CHEST:
+                return ConstantKeys.CHEST;
+            case MINECART_MOB_SPAWNER:
+                return ConstantKeys.MOB_SPAWNER;
         }
 
+        return null;
     }
 
 }

@@ -14,11 +14,17 @@ import com.bgsoftware.superiorskyblock.core.collections.EnumerateSet;
 import com.bgsoftware.superiorskyblock.core.logging.Log;
 import com.bgsoftware.superiorskyblock.core.threads.BukkitExecutor;
 import com.bgsoftware.superiorskyblock.core.threads.Synchronized;
+import com.bgsoftware.superiorskyblock.island.top.SortingComparators;
+import com.bgsoftware.superiorskyblock.island.top.SortingTypes;
+import com.bgsoftware.superiorskyblock.island.top.metadata.IslandSortMetadata;
+import com.bgsoftware.superiorskyblock.island.top.metadata.IslandSortPlayerMetadata;
+import com.bgsoftware.superiorskyblock.island.top.metadata.IslandSortRatingMetadata;
+import com.bgsoftware.superiorskyblock.island.top.metadata.IslandSortValueMetadata;
 import com.google.common.base.Preconditions;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 
-import java.util.ArrayList;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -49,7 +55,7 @@ public class DefaultIslandsContainer implements IslandsContainer {
 
         Preconditions.checkNotNull(defaultWorld, "Default world information cannot be null!");
 
-        this.islandsByPositions.put(IslandPosition.of(defaultWorld.getName(), center.getX(), center.getZ()), island);
+        this.islandsByPositions.put(IslandPosition.of(defaultWorld.getName(), center.getX(), center.getZ(), false), island);
 
         if (plugin.getProviders().hasCustomWorldsSupport()) {
             // We don't know the logic of the custom worlds support, therefore we add a position
@@ -77,7 +83,9 @@ public class DefaultIslandsContainer implements IslandsContainer {
 
         Preconditions.checkNotNull(defaultWorld, "Default world information cannot be null!");
 
-        this.islandsByPositions.remove(IslandPosition.of(defaultWorld.getName(), center.getX(), center.getZ()), island);
+        try (IslandPosition islandPosition = IslandPosition.of(defaultWorld.getName(), center.getX(), center.getZ())) {
+            this.islandsByPositions.remove(islandPosition, island);
+        }
 
         if (plugin.getProviders().hasCustomWorldsSupport()) {
             for (Dimension dimension : Dimension.values()) {
@@ -126,7 +134,10 @@ public class DefaultIslandsContainer implements IslandsContainer {
     @Nullable
     @Override
     public Island getIslandAt(Location location) {
-        Island island = this.islandsByPositions.get(IslandPosition.of(location));
+        Island island;
+        try (IslandPosition islandPosition = IslandPosition.of(location)) {
+            island = this.islandsByPositions.get(islandPosition);
+        }
         return island == null || !island.isInside(location) ? null : island;
     }
 
@@ -182,27 +193,59 @@ public class DefaultIslandsContainer implements IslandsContainer {
     }
 
     private void sortIslandsInternal(SortingType sortingType, Runnable onFinish) {
-        List<Island> newIslandsList = new ArrayList<>(islandsByUUID.values());
-        newIslandsList.removeIf(Island::isIgnored);
+        List<Island> existingIslands = new LinkedList<>(islandsByUUID.values());
+        existingIslands.removeIf(Island::isIgnored);
 
-        try {
-            newIslandsList.sort(sortingType);
+        List<Island> sortedIslands;
+
+        if (existingIslands.size() <= 1) {
+            sortedIslands = existingIslands;
+        } else try {
+            if (sortingType == SortingTypes.BY_LEVEL || sortingType == SortingTypes.BY_WORTH ||
+                    sortingType == SortingTypes.BY_PLAYERS || sortingType == SortingTypes.BY_RATING) {
+                sortedIslands = sortIslandsBuiltinSortingType(existingIslands, sortingType);
+            } else {
+                sortedIslands = existingIslands;
+                sortedIslands.sort(sortingType);
+            }
         } catch (Throwable error) {
             Log.warn("An error occurred while sorting islands for sorting-type ", sortingType.getName(), ":");
             throw error;
         }
 
-        this.sortedIslands.put(sortingType, Synchronized.of(newIslandsList));
+        this.sortedIslands.put(sortingType, Synchronized.of(sortedIslands));
 
         if (onFinish != null)
             onFinish.run();
+    }
+
+    private List<Island> sortIslandsBuiltinSortingType(List<Island> existingIslands, SortingType sortingType) {
+        List<IslandSortMetadata<?>> islandMetadatas = new LinkedList<>();
+
+        if (sortingType == SortingTypes.BY_WORTH)
+            existingIslands.forEach(island -> islandMetadatas.add(new IslandSortValueMetadata(island, island.getWorth())));
+        else if (sortingType == SortingTypes.BY_LEVEL)
+            existingIslands.forEach(island -> islandMetadatas.add(new IslandSortValueMetadata(island, island.getIslandLevel())));
+        else if (sortingType == SortingTypes.BY_RATING)
+            existingIslands.forEach(island -> islandMetadatas.add(new IslandSortRatingMetadata(island)));
+        else /* BY_PLAYERS */
+            existingIslands.forEach(island -> islandMetadatas.add(new IslandSortPlayerMetadata(island)));
+
+        if (islandMetadatas.size() > 1) {
+            islandMetadatas.sort(SortingComparators.ISLAND_METADATA_COMPARATOR);
+        }
+
+        existingIslands.clear();
+        islandMetadatas.forEach(islandMetadata -> existingIslands.add(islandMetadata.getIsland()));
+
+        return existingIslands;
     }
 
     private void runWithCustomWorld(WorldInfo defaultWorld, BlockPosition center, Island island,
                                     Dimension dimension, Consumer<IslandPosition> consumer) {
         WorldInfo worldInfo = plugin.getGrid().getIslandsWorldInfo(island, dimension);
         if (worldInfo != null && !worldInfo.equals(defaultWorld))
-            consumer.accept(IslandPosition.of(worldInfo.getName(), center.getX(), center.getZ()));
+            consumer.accept(IslandPosition.of(worldInfo.getName(), center.getX(), center.getZ(), false));
     }
 
 }

@@ -5,11 +5,15 @@ import com.bgsoftware.superiorskyblock.api.key.Key;
 import com.bgsoftware.superiorskyblock.api.key.KeyMap;
 import com.bgsoftware.superiorskyblock.api.schematic.Schematic;
 import com.bgsoftware.superiorskyblock.api.wrappers.BlockOffset;
+import com.bgsoftware.superiorskyblock.core.BigBitSet;
+import com.bgsoftware.superiorskyblock.core.ByteBigArray;
 import com.bgsoftware.superiorskyblock.core.ChunkPosition;
 import com.bgsoftware.superiorskyblock.core.SBlockOffset;
 import com.bgsoftware.superiorskyblock.core.VarintArray;
+import com.bgsoftware.superiorskyblock.core.events.plugin.PluginEventsFactory;
 import com.bgsoftware.superiorskyblock.core.logging.Debug;
 import com.bgsoftware.superiorskyblock.core.logging.Log;
+import com.bgsoftware.superiorskyblock.core.mutable.MutableBoolean;
 import com.bgsoftware.superiorskyblock.core.profiler.ProfileType;
 import com.bgsoftware.superiorskyblock.core.profiler.Profiler;
 import com.bgsoftware.superiorskyblock.core.schematic.SchematicBlock;
@@ -32,7 +36,6 @@ import org.bukkit.Location;
 import org.bukkit.entity.EntityType;
 
 import java.util.ArrayList;
-import java.util.BitSet;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -46,12 +49,13 @@ import java.util.function.Consumer;
 
 public class SuperiorSchematic extends BaseSchematic implements Schematic {
 
-    private static final byte[] EMPTY_BLOCK_IDS = new byte[0];
-    private static final BitSet EMPTY_BIT_SET = BitSet.valueOf(EMPTY_BLOCK_IDS);
+    private static final ByteBigArray EMPTY_BLOCK_IDS = new ByteBigArray((short) 0);
+    private static final BigBitSet EMPTY_BIT_SET = new BigBitSet(0);
 
     private final Data data;
 
     private List<ChunkPosition> affectedChunks = null;
+    private Runnable onTeleportCallback = null;
 
     public SuperiorSchematic(String name, CompoundTag compoundTag) {
         super(name);
@@ -70,8 +74,8 @@ public class SuperiorSchematic extends BaseSchematic implements Schematic {
 
         int dataVersion = compoundTag.getInt("minecraftDataVersion", -1);
 
-        byte[] blockIds;
-        BitSet bitSet;
+        ByteBigArray blockIds;
+        BigBitSet bitSet;
         Map<BlockOffset, SchematicBlock.Extra> extra;
         int minX;
         int minY;
@@ -98,7 +102,7 @@ public class SuperiorSchematic extends BaseSchematic implements Schematic {
 
             for (Tag<?> tag : blocksList) {
                 SchematicBlockData schematicBlock = SuperiorSchematicDeserializer.deserializeSchematicBlock((CompoundTag) tag, dataVersion);
-                if (schematicBlock != null && schematicBlock.getCombinedId() > 0) {
+                if (schematicBlock != null) {
                     schematicBlocks.add(schematicBlock);
                     readBlock(schematicBlock);
 
@@ -125,7 +129,7 @@ public class SuperiorSchematic extends BaseSchematic implements Schematic {
             }
 
             VarintArray blockIdsVarintArray = new VarintArray();
-            bitSet = new BitSet(xSize * ySize * zSize);
+            bitSet = new BigBitSet(xSize * ySize * zSize);
             extra = new HashMap<>();
 
             for (SchematicBlockData schematicBlock : schematicBlocks) {
@@ -145,7 +149,7 @@ public class SuperiorSchematic extends BaseSchematic implements Schematic {
                     extra.put(blockOffset, schematicBlock.getExtra());
             }
 
-            blockIds = blockIdsVarintArray.toByteArray();
+            blockIds = blockIdsVarintArray.toArray();
         }
 
         List<SchematicEntity> entities;
@@ -235,7 +239,7 @@ public class SuperiorSchematic extends BaseSchematic implements Schematic {
                 finishTasks.add(() -> schematicBlock.doPostPlace(island));
         }
 
-        if(blockIdsIterator.hasNext())
+        if (blockIdsIterator.hasNext())
             throw new IllegalStateException("Not all blocks were read from varint iterator");
 
         Profiler.end(placeProfiler);
@@ -244,8 +248,17 @@ public class SuperiorSchematic extends BaseSchematic implements Schematic {
         List<CompletableFuture<Chunk>> chunkFutures = new ArrayList<>(affectedChunks.size());
 
         AtomicBoolean failed = new AtomicBoolean(false);
+        MutableBoolean printedWarning = new MutableBoolean(false);
 
         affectedChunks.forEach(chunkPosition -> {
+            if (!island.isInside(chunkPosition.getWorld(), chunkPosition.getX(), chunkPosition.getZ())) {
+                if (!printedWarning.get()) {
+                    Log.warn("Part of the schematic ", name, " is placed outside of the island, skipping this part...");
+                    printedWarning.set(true);
+                }
+                return;
+            }
+
             chunkFutures.add(ChunksProvider.loadChunk(chunkPosition, ChunkLoadReason.SCHEMATIC_PLACE, chunk -> {
                 if (failed.get())
                     return;
@@ -255,7 +268,7 @@ public class SuperiorSchematic extends BaseSchematic implements Schematic {
 
                     boolean cropGrowthEnabled = BuiltinModules.UPGRADES.isUpgradeTypeEnabled(UpgradeTypeCropGrowth.class);
                     if (cropGrowthEnabled && island.isInsideRange(chunk)) {
-                        plugin.getNMSChunks().startTickingChunk(island, chunk, false);
+                        BukkitExecutor.ensureMain(() -> plugin.getNMSChunks().startTickingChunk(island, chunk, false));
                     }
 
                     island.markChunkDirty(chunk.getWorld(), chunk.getX(), chunk.getZ(), true);
@@ -285,23 +298,22 @@ public class SuperiorSchematic extends BaseSchematic implements Schematic {
                     if (island.getOwner().isOnline())
                         finishTasks.forEach(Runnable::run);
 
-                    Log.debugResult(Debug.PASTE_SCHEMATIC, "Spawning Entities", "");
-
-                    for (SchematicEntity entity : this.data.entities) {
-                        entity.spawnEntity(min);
-                    }
-
                     Log.debugResult(Debug.PASTE_SCHEMATIC, "Finished Schematic Placement", "");
 
                     island.handleBlocksPlace(cachedCounts);
 
-                    plugin.getEventsBus().callIslandSchematicPasteEvent(island, name, location);
+                    PluginEventsFactory.callIslandSchematicPasteEvent(island, null, name, location);
 
                     Profiler.end(profiler);
 
-                    this.affectedChunks = new LinkedList<>(affectedChunks);
-                    callback.run();
-                    this.affectedChunks = null;
+                    synchronized (this) {
+                        try {
+                            prepareCallback(affectedChunks, min);
+                            callback.run();
+                        } finally {
+                            finishCallback();
+                        }
+                    }
                 } catch (Throwable error2) {
                     Log.debugResult(Debug.PASTE_SCHEMATIC, "Failed Finishing Placement", error2);
                     Profiler.end(profiler);
@@ -324,6 +336,11 @@ public class SuperiorSchematic extends BaseSchematic implements Schematic {
         return affectedChunks == null ? Collections.emptyList() : Collections.unmodifiableList(affectedChunks);
     }
 
+    @Override
+    public Runnable onTeleportCallback() {
+        return this.onTeleportCallback;
+    }
+
     public SuperiorSchematic copy(String newName) {
         return new SuperiorSchematic(newName, this.data, this.cachedCounts);
     }
@@ -333,14 +350,31 @@ public class SuperiorSchematic extends BaseSchematic implements Schematic {
         cachedCounts.put(key, cachedCounts.getRaw(key, 0) + 1);
     }
 
+    private void prepareCallback(List<ChunkPosition> affectedChunks, Location min) {
+        this.affectedChunks = new LinkedList<>(affectedChunks);
+        // We spawn the entities with a delay, waiting for players to teleport to the island first.
+        this.onTeleportCallback = () -> {
+            BukkitExecutor.sync(() -> {
+                for (SchematicEntity entity : data.entities) {
+                    entity.spawnEntity(min);
+                }
+            }, 20L);
+        };
+    }
+
+    private void finishCallback() {
+        this.affectedChunks = null;
+        this.onTeleportCallback = null;
+    }
+
     private static class Data {
 
         private final BlockOffset offset;
         private final float yaw;
         private final float pitch;
 
-        private final BitSet bitSet;
-        private final byte[] blockIds;
+        private final BigBitSet bitSet;
+        private final ByteBigArray blockIds;
         private final Map<BlockOffset, SchematicBlock.Extra> extra;
         private final List<SchematicEntity> entities;
 
@@ -353,7 +387,7 @@ public class SuperiorSchematic extends BaseSchematic implements Schematic {
         private final int zSize;
 
         Data(BlockOffset offset, float yaw, float pitch,
-             BitSet bitSet, byte[] blockIds, int xSize, int ySize, int zSize, int minX, int minY, int minZ,
+             BigBitSet bitSet, ByteBigArray blockIds, int xSize, int ySize, int zSize, int minX, int minY, int minZ,
              Map<BlockOffset, SchematicBlock.Extra> extra, List<SchematicEntity> entities) {
             this.offset = offset;
             this.yaw = yaw;

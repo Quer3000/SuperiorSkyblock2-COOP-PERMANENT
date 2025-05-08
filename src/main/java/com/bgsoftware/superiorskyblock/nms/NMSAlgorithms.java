@@ -5,8 +5,9 @@ import com.bgsoftware.superiorskyblock.api.key.Key;
 import com.bgsoftware.superiorskyblock.core.io.ClassProcessor;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.block.Block;
+import org.bukkit.block.BlockState;
 import org.bukkit.command.defaults.BukkitCommand;
-import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.FallingBlock;
 import org.bukkit.entity.Minecart;
 import org.bukkit.event.inventory.InventoryType;
@@ -16,7 +17,7 @@ import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.PotionMeta;
 import org.bukkit.potion.PotionEffect;
 
-import java.lang.reflect.Field;
+import java.util.Optional;
 
 public interface NMSAlgorithms {
 
@@ -28,7 +29,15 @@ public interface NMSAlgorithms {
 
     int getCombinedId(Material material, byte data);
 
+    Optional<String> getTileEntityIdFromCombinedId(int combinedId);
+
     int compareMaterials(Material o1, Material o2);
+
+    short getBlockDataValue(BlockState blockState);
+
+    short getBlockDataValue(Block block);
+
+    short getMaxBlockDataValue(Material material);
 
     Key getBlockKey(int combinedId);
 
@@ -42,30 +51,7 @@ public interface NMSAlgorithms {
 
     String getMinecraftKey(ItemStack itemStack);
 
-    @Nullable
-    Enchantment getGlowEnchant();
-
-    @Nullable
-    default Enchantment createGlowEnchantment() {
-        Enchantment glowEnchant = getGlowEnchant();
-
-        if (glowEnchant != null) {
-            try {
-                Field field = Enchantment.class.getDeclaredField("acceptingNew");
-                field.setAccessible(true);
-                field.set(null, true);
-                field.setAccessible(false);
-            } catch (Exception ignored) {
-            }
-
-            try {
-                Enchantment.registerEnchantment(glowEnchant);
-            } catch (Exception ignored) {
-            }
-        }
-
-        return glowEnchant;
-    }
+    void makeItemGlow(ItemMeta itemMeta);
 
     @Nullable
     Object createMenuInventoryHolder(InventoryType inventoryType, InventoryHolder defaultHolder, String title);
@@ -84,4 +70,7 @@ public interface NMSAlgorithms {
         throw new UnsupportedOperationException();
     }
 
+    default void hideAttributes(ItemMeta itemMeta) {
+
+    }
 }

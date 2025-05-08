@@ -5,11 +5,13 @@ import com.bgsoftware.superiorskyblock.api.island.Island;
 import com.bgsoftware.superiorskyblock.api.island.IslandPrivilege;
 import com.bgsoftware.superiorskyblock.api.island.warps.WarpCategory;
 import com.bgsoftware.superiorskyblock.api.wrappers.SuperiorPlayer;
-import com.bgsoftware.superiorskyblock.core.messages.Message;
 import com.bgsoftware.superiorskyblock.commands.IPermissibleCommand;
+import com.bgsoftware.superiorskyblock.core.ObjectsPools;
+import com.bgsoftware.superiorskyblock.core.events.plugin.PluginEventsFactory;
 import com.bgsoftware.superiorskyblock.core.formatting.Formatters;
-import com.bgsoftware.superiorskyblock.island.privilege.IslandPrivileges;
+import com.bgsoftware.superiorskyblock.core.messages.Message;
 import com.bgsoftware.superiorskyblock.island.IslandUtils;
+import com.bgsoftware.superiorskyblock.island.privilege.IslandPrivileges;
 import com.google.common.base.Preconditions;
 import org.bukkit.Location;
 
@@ -95,9 +97,11 @@ public class CmdSetWarp implements IPermissibleCommand {
             return;
         }
 
-        if (!island.isInsideRange(superiorPlayer.getLocation())) {
-            Message.SET_WARP_OUTSIDE.send(superiorPlayer);
-            return;
+        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+            if (!island.isInsideRange(superiorPlayer.getLocation(wrapper.getHandle()))) {
+                Message.SET_WARP_OUTSIDE.send(superiorPlayer);
+                return;
+            }
         }
 
         String categoryName = null;
@@ -116,22 +120,24 @@ public class CmdSetWarp implements IPermissibleCommand {
             }
 
             if (island.getWarpCategory(categoryName) == null &&
-                    !plugin.getEventsBus().callIslandCreateWarpCategoryEvent(superiorPlayer, island, categoryName))
+                    !PluginEventsFactory.callIslandCreateWarpCategoryEvent(island, superiorPlayer, categoryName))
                 return;
         }
 
         WarpCategory warpCategory = categoryName == null ? null : island.createWarpCategory(categoryName);
 
-        Location warpLocation = superiorPlayer.getLocation();
+        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+            Location warpLocation = superiorPlayer.getLocation(wrapper.getHandle());
 
-        Preconditions.checkState(warpLocation != null, "Null location for a warp.");
+            Preconditions.checkState(warpLocation != null, "Null location for a warp.");
 
-        if (!plugin.getEventsBus().callIslandCreateWarpEvent(superiorPlayer, island, warpName, warpLocation, warpCategory))
-            return;
+            if (!PluginEventsFactory.callIslandCreateWarpEvent(island, superiorPlayer, warpName, warpLocation, warpCategory))
+                return;
 
-        island.createWarp(warpName, warpLocation, warpCategory);
+            island.createWarp(warpName, warpLocation, warpCategory);
 
-        Message.SET_WARP.send(superiorPlayer, Formatters.LOCATION_FORMATTER.format(warpLocation));
+            Message.SET_WARP.send(superiorPlayer, Formatters.LOCATION_FORMATTER.format(warpLocation));
+        }
     }
 
 }

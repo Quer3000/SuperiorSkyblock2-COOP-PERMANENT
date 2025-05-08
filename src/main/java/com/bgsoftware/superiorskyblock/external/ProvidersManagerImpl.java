@@ -34,6 +34,7 @@ import com.bgsoftware.superiorskyblock.core.logging.Log;
 import com.bgsoftware.superiorskyblock.core.threads.BukkitExecutor;
 import com.bgsoftware.superiorskyblock.external.async.AsyncProvider;
 import com.bgsoftware.superiorskyblock.external.async.AsyncProvider_Default;
+import com.bgsoftware.superiorskyblock.external.blocks.ICustomBlocksProvider;
 import com.bgsoftware.superiorskyblock.external.chunks.ChunksProvider_Default;
 import com.bgsoftware.superiorskyblock.external.economy.EconomyProvider_Default;
 import com.bgsoftware.superiorskyblock.external.menus.MenusProvider_Default;
@@ -97,6 +98,7 @@ public class ProvidersManagerImpl extends Manager implements ProvidersManager {
     private final List<ISkinsListener> skinsListeners = new LinkedList<>();
     private final List<IStackedBlocksListener> stackedBlocksListeners = new LinkedList<>();
     private final List<IWorldsListener> worldsListeners = new LinkedList<>();
+    private final List<ICustomBlocksProvider> customBlocksProviders = new LinkedList<>();
 
     public ProvidersManagerImpl(SuperiorSkyblockPlugin plugin) {
         super(plugin);
@@ -120,6 +122,9 @@ public class ProvidersManagerImpl extends Manager implements ProvidersManager {
             registerPlaceholdersProvider();
             registerChunksProvider();
         });
+
+        registerMessageProviders();
+
         // We try to forcefully load prices after a second the server has enabled.
         BukkitExecutor.sync(this::forcePricesLoad, 60L);
     }
@@ -288,6 +293,14 @@ public class ProvidersManagerImpl extends Manager implements ProvidersManager {
         this.stackedBlocksListeners.remove(stackedBlocksListener);
     }
 
+    public void registerCustomBlocksProvider(ICustomBlocksProvider customBlocksProvider) {
+        this.customBlocksProviders.add(customBlocksProvider);
+    }
+
+    public List<ICustomBlocksProvider> getCustomBlocksProviders() {
+        return customBlocksProviders;
+    }
+
     public void addPricesLoadCallback(Runnable callback) {
         if (this.pricesLoadCallbacks == null) {
             callback.run();
@@ -448,6 +461,9 @@ public class ProvidersManagerImpl extends Manager implements ProvidersManager {
         if (Bukkit.getPluginManager().isPluginEnabled("Oraxen"))
             registerHook("OraxenHook");
 
+        if (Bukkit.getPluginManager().isPluginEnabled("Nexo"))
+            registerHook("NexoHook");
+
         if (Bukkit.getPluginManager().isPluginEnabled("ItemsAdder"))
             registerHook("ItemsAdderHook");
 
@@ -459,6 +475,13 @@ public class ProvidersManagerImpl extends Manager implements ProvidersManager {
             if (pluginAuthors.contains("mushroomhostage")) {
                 registerHook("TimbruSilkSpawnersHook");
             }
+        }
+
+    }
+
+    private void registerMessageProviders() {
+        if (isHookEnabled("MiniMessage") && hasMiniMessageSupport()) {
+            registerHook("MiniMessageHook");
         }
     }
 
@@ -669,6 +692,15 @@ public class ProvidersManagerImpl extends Manager implements ProvidersManager {
     private static boolean isOldSlimeWorldManager() {
         try {
             Class.forName("com.grinderwolf.swm.api.SlimePlugin");
+            return true;
+        } catch (ClassNotFoundException error) {
+            return false;
+        }
+    }
+
+    private static boolean hasMiniMessageSupport() {
+        try {
+            Class.forName("net.kyori.adventure.text.minimessage.MiniMessage");
             return true;
         } catch (ClassNotFoundException error) {
             return false;

@@ -8,7 +8,9 @@ import com.bgsoftware.superiorskyblock.api.world.algorithm.IslandCreationAlgorit
 import com.bgsoftware.superiorskyblock.api.wrappers.BlockPosition;
 import com.bgsoftware.superiorskyblock.api.wrappers.SuperiorPlayer;
 import com.bgsoftware.superiorskyblock.core.Text;
-import com.bgsoftware.superiorskyblock.core.events.EventResult;
+import com.bgsoftware.superiorskyblock.core.events.args.PluginEventArgs;
+import com.bgsoftware.superiorskyblock.core.events.plugin.PluginEvent;
+import com.bgsoftware.superiorskyblock.core.events.plugin.PluginEventsFactory;
 import com.bgsoftware.superiorskyblock.core.logging.Debug;
 import com.bgsoftware.superiorskyblock.core.logging.Log;
 import com.bgsoftware.superiorskyblock.core.profiler.ProfileType;
@@ -90,7 +92,7 @@ public class DefaultIslandCreationAlgorithm implements IslandCreationAlgorithm {
 
         island.getDatabaseBridge().setDatabaseBridgeMode(DatabaseBridgeMode.IDLE);
 
-        EventResult<Boolean> event = plugin.getEventsBus().callIslandCreateEvent(builder.owner, island, builder.islandType);
+        PluginEvent<PluginEventArgs.IslandCreate> event = PluginEventsFactory.callIslandCreateEvent(island, builder.owner, builder.islandType);
 
         if (event.isCancelled()) {
             Log.debugResult(Debug.CREATE_ISLAND, "Creation Failed", "Event was cancelled for creating the island '" + builder.islandName + "'.");
@@ -99,10 +101,13 @@ public class DefaultIslandCreationAlgorithm implements IslandCreationAlgorithm {
 
         CompletableFuture<IslandCreationResult> completableFuture = new CompletableFuture<>();
 
-        schematic.pasteSchematic(island, islandLocation.getBlock().getRelative(BlockFace.DOWN).getLocation(), () -> {
+        // Clone location as pasteSchematic uses the same location in later scheduled tasks
+        Location location = islandLocation.getBlock().getRelative(BlockFace.DOWN).getLocation();
+
+        schematic.pasteSchematic(island, location, () -> {
             plugin.getProviders().getWorldsProvider().finishIslandCreation(islandLocation,
                     builder.owner.getUniqueId(), builder.uuid);
-            completableFuture.complete(new IslandCreationResult(IslandCreationResult.Status.SUCCESS, island, islandLocation, event.getResult()));
+            completableFuture.complete(new IslandCreationResult(IslandCreationResult.Status.SUCCESS, island, islandLocation, event.getArgs().canTeleport));
             island.getDatabaseBridge().setDatabaseBridgeMode(DatabaseBridgeMode.SAVE_DATA);
             Profiler.end(profiler);
         }, error -> {

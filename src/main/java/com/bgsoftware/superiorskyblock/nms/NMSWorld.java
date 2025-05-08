@@ -5,15 +5,16 @@ import com.bgsoftware.superiorskyblock.api.key.Key;
 import com.bgsoftware.superiorskyblock.api.world.Dimension;
 import com.bgsoftware.superiorskyblock.api.wrappers.SuperiorPlayer;
 import com.bgsoftware.superiorskyblock.nms.bridge.PistonPushReaction;
+import com.bgsoftware.superiorskyblock.nms.world.ChunkReader;
 import com.bgsoftware.superiorskyblock.nms.world.WorldEditSession;
-import com.bgsoftware.superiorskyblock.tag.CompoundTag;
+import com.bgsoftware.superiorskyblock.world.SignType;
 import com.bgsoftware.superiorskyblock.world.generator.IslandsGenerator;
+import org.bukkit.Chunk;
 import org.bukkit.ChunkSnapshot;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
-import org.bukkit.event.block.SignChangeEvent;
 
 import java.util.function.IntFunction;
 
@@ -23,6 +24,14 @@ public interface NMSWorld {
 
     void listenSpawner(Location location, IntFunction<Integer> delayChangeCallback);
 
+    default void replaceTrialBlockPlayerDetector(Island island, Location location) {
+        // Does not exist.
+    }
+
+    default void replaceSculkSensorListener(Island island, Location location) {
+        // Does not exist.
+    }
+
     void setWorldBorder(SuperiorPlayer superiorPlayer, Island island);
 
     Object getBlockData(Block block);
@@ -31,13 +40,13 @@ public interface NMSWorld {
 
     ICachedBlock cacheBlock(Block block);
 
-    CompoundTag readBlockStates(Location location);
-
-    byte[] getLightLevels(Location location);
-
-    CompoundTag readTileEntity(Location location);
-
     boolean isWaterLogged(Block block);
+
+    default SignType getSignType(Block block) {
+        return getSignType(getBlockData(block));
+    }
+
+    SignType getSignType(Object sign);
 
     PistonPushReaction getPistonReaction(Block block);
 
@@ -46,8 +55,6 @@ public interface NMSWorld {
     int getDefaultAmount(BlockState blockState);
 
     void placeSign(Island island, Location location);
-
-    void setSignLines(SignChangeEvent signChangeEvent, String[] lines);
 
     void playGeneratorSound(Location location);
 
@@ -62,5 +69,7 @@ public interface NMSWorld {
     IslandsGenerator createGenerator(Dimension dimension);
 
     WorldEditSession createEditSession(World world);
+
+    ChunkReader createChunkReader(Chunk chunk);
 
 }

@@ -1,25 +1,29 @@
 package com.bgsoftware.superiorskyblock.external;
 
 import com.bgsoftware.superiorskyblock.core.ChunkPosition;
+import com.bgsoftware.superiorskyblock.core.collections.Chunk2ObjectMap;
 import com.bgsoftware.superiorskyblock.core.logging.Log;
+import com.bgsoftware.superiorskyblock.core.threads.Synchronized;
 import com.bgsoftware.wildstacker.api.WildStackerAPI;
 import com.bgsoftware.wildstacker.api.objects.StackedSnapshot;
 import org.bukkit.Chunk;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-
 public class WildStackerSnapshotsContainer {
 
-    private static final Map<ChunkPosition, StackedSnapshot> cachedSnapshots = new ConcurrentHashMap<>();
+    private static final Synchronized<Chunk2ObjectMap<StackedSnapshot>> cachedSnapshots = Synchronized.of(new Chunk2ObjectMap<>());
 
     private WildStackerSnapshotsContainer() {
 
     }
 
     public static void takeSnapshot(Chunk chunk) {
-        ChunkPosition chunkPosition = ChunkPosition.of(chunk);
+        try (ChunkPosition chunkPosition = ChunkPosition.of(chunk)) {
+            cachedSnapshots.write(cachedSnapshots ->
+                    takeSnapshotInternal(chunk, chunkPosition, cachedSnapshots));
+        }
+    }
 
+    private static void takeSnapshotInternal(Chunk chunk, ChunkPosition chunkPosition, Chunk2ObjectMap<StackedSnapshot> cachedSnapshots) {
         if (cachedSnapshots.containsKey(chunkPosition))
             return;
 
@@ -42,11 +46,11 @@ public class WildStackerSnapshotsContainer {
     }
 
     public static void releaseSnapshot(ChunkPosition chunkPosition) {
-        cachedSnapshots.remove(chunkPosition);
+        cachedSnapshots.write(m -> m.remove(chunkPosition));
     }
 
     public static StackedSnapshot getSnapshot(ChunkPosition chunkPosition) {
-        StackedSnapshot stackedSnapshot = cachedSnapshots.get(chunkPosition);
+        StackedSnapshot stackedSnapshot = cachedSnapshots.readAndGet(m -> m.get(chunkPosition));
 
         if (stackedSnapshot == null) {
             throw new RuntimeException("Chunk " + chunkPosition + " is not cached.");

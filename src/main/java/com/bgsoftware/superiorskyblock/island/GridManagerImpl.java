@@ -23,18 +23,22 @@ import com.bgsoftware.superiorskyblock.core.ChunkPosition;
 import com.bgsoftware.superiorskyblock.core.LazyReference;
 import com.bgsoftware.superiorskyblock.core.LazyWorldLocation;
 import com.bgsoftware.superiorskyblock.core.Manager;
+import com.bgsoftware.superiorskyblock.core.ObjectsPools;
 import com.bgsoftware.superiorskyblock.core.SBlockPosition;
 import com.bgsoftware.superiorskyblock.core.SequentialListBuilder;
+import com.bgsoftware.superiorskyblock.core.collections.EnumerateSet;
 import com.bgsoftware.superiorskyblock.core.database.DatabaseResult;
 import com.bgsoftware.superiorskyblock.core.database.bridge.GridDatabaseBridge;
 import com.bgsoftware.superiorskyblock.core.database.bridge.IslandsDatabaseBridge;
 import com.bgsoftware.superiorskyblock.core.errors.ManagerLoadException;
+import com.bgsoftware.superiorskyblock.core.events.plugin.PluginEventsFactory;
 import com.bgsoftware.superiorskyblock.core.formatting.Formatters;
 import com.bgsoftware.superiorskyblock.core.logging.Debug;
 import com.bgsoftware.superiorskyblock.core.logging.Log;
 import com.bgsoftware.superiorskyblock.core.messages.Message;
 import com.bgsoftware.superiorskyblock.core.serialization.Serializers;
 import com.bgsoftware.superiorskyblock.core.threads.BukkitExecutor;
+import com.bgsoftware.superiorskyblock.core.threads.Synchronized;
 import com.bgsoftware.superiorskyblock.island.algorithm.DefaultIslandCreationAlgorithm;
 import com.bgsoftware.superiorskyblock.island.builder.IslandBuilderImpl;
 import com.bgsoftware.superiorskyblock.island.preview.IslandPreviews;
@@ -68,6 +72,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 public class GridManagerImpl extends Manager implements GridManager {
@@ -105,6 +110,13 @@ public class GridManagerImpl extends Manager implements GridManager {
     private boolean forceSort = false;
 
     private final List<SortingType> pendingSortingTypes = new LinkedList<>();
+    private final AtomicInteger activeCalcTasks = new AtomicInteger(0);
+    private final LazyReference<Synchronized<EnumerateSet<SortingType>>> activeSortingTasks = new LazyReference<Synchronized<EnumerateSet<SortingType>>>() {
+        @Override
+        protected Synchronized<EnumerateSet<SortingType>> create() {
+            return Synchronized.of(new EnumerateSet<>(SortingType.values()));
+        }
+    };
 
     public GridManagerImpl(SuperiorSkyblockPlugin plugin, IslandsPurger islandsPurger, IslandPreviews islandPreviews) {
         super(plugin);
@@ -244,7 +256,7 @@ public class GridManagerImpl extends Manager implements GridManager {
         // Removing any active previews for the player.
         boolean updateGamemode = this.islandPreviews.endIslandPreview(builder.owner) != null;
 
-        if (!plugin.getEventsBus().callPreIslandCreateEvent(builder.owner, builder.islandName))
+        if (!PluginEventsFactory.callPreIslandCreateEvent(builder.owner, builder.islandName))
             return;
 
         builder.setUniqueId(generateIslandUUID());
@@ -309,6 +321,8 @@ public class GridManagerImpl extends Manager implements GridManager {
 
         List<ChunkPosition> affectedChunks = schematic instanceof BaseSchematic ?
                 ((BaseSchematic) schematic).getAffectedChunks() : null;
+        Runnable onTeleportCallback = schematic instanceof BaseSchematic ?
+                ((BaseSchematic) schematic).onTeleportCallback() : null;
 
         Log.debugResult(Debug.CREATE_ISLAND, "Creation Callback", "Registering new island");
 
@@ -336,7 +350,7 @@ public class GridManagerImpl extends Manager implements GridManager {
         if (spawnOffset != null)
             homeLocation = spawnOffset.applyToLocation(homeLocation);
 
-        island.setIslandHome(homeLocation);
+        island.setIslandHome(plugin.getSettings().getWorlds().getDefaultWorldDimension(), homeLocation);
 
         BukkitExecutor.sync(() -> builder.owner.runIfOnline(player -> {
             if (updateGamemode)
@@ -372,7 +386,10 @@ public class GridManagerImpl extends Manager implements GridManager {
                             this.dragonBattleService.get().resetEnderDragonBattle(island, defaultDimension);
                         }
 
-                        plugin.getEventsBus().callPostIslandCreateEvent(builder.owner, island);
+                        PluginEventsFactory.callPostIslandCreateEvent(island, builder.owner);
+
+                        if (onTeleportCallback != null)
+                            onTeleportCallback.run();
                     }
                 });
             }
@@ -398,17 +415,22 @@ public class GridManagerImpl extends Manager implements GridManager {
 
     @Override
     public void startIslandPreview(SuperiorPlayer superiorPlayer, String schemName, String islandName) {
-        Preconditions.checkNotNull(superiorPlayer, "superiorPlayer parameter cannot be null.");
         Preconditions.checkNotNull(schemName, "schemName parameter cannot be null.");
+        startIslandPreview(superiorPlayer, plugin.getSchematics().getSchematic(schemName), islandName);
+    }
+
+    public void startIslandPreview(SuperiorPlayer superiorPlayer, Schematic schematic, String islandName) {
+        Preconditions.checkNotNull(superiorPlayer, "superiorPlayer parameter cannot be null.");
+        Preconditions.checkNotNull(schematic, "schematic parameter cannot be null.");
         Preconditions.checkNotNull(islandName, "islandName parameter cannot be null.");
 
-        Location previewLocation = plugin.getSettings().getPreviewIslands().get(schemName.toLowerCase(Locale.ENGLISH));
+        Location previewLocation = plugin.getSettings().getPreviewIslands().get(schematic.getName().toLowerCase(Locale.ENGLISH));
         if (previewLocation != null && previewLocation.getWorld() != null) {
             superiorPlayer.teleport(previewLocation, result -> {
                 if (result) {
-                    this.islandPreviews.startIslandPreview(new SIslandPreview(superiorPlayer, previewLocation, schemName, islandName));
+                    this.islandPreviews.startIslandPreview(new SIslandPreview(superiorPlayer, previewLocation, schematic, islandName));
                     BukkitExecutor.ensureMain(() -> superiorPlayer.runIfOnline(player -> player.setGameMode(GameMode.SPECTATOR)));
-                    Message.ISLAND_PREVIEW_START.send(superiorPlayer, schemName);
+                    Message.ISLAND_PREVIEW_START.send(superiorPlayer, schematic.getName());
                 }
             });
         }
@@ -549,8 +571,10 @@ public class GridManagerImpl extends Manager implements GridManager {
         if (!plugin.getGrid().isIslandsWorld(chunk.getWorld()))
             return null;
 
-        ChunkPosition chunkPosition = ChunkPosition.of(chunk);
-        Location cornerLocation = WorldBlocks.getChunkBlock(chunkPosition, 0, 100, 0);
+        Location cornerLocation;
+        try (ChunkPosition chunkPosition = ChunkPosition.of(chunk)) {
+            cornerLocation = WorldBlocks.getChunkBlock(chunkPosition, 0, 100, 0);
+        }
 
         Island island;
 
@@ -585,8 +609,10 @@ public class GridManagerImpl extends Manager implements GridManager {
 
         Set<Island> islands = new LinkedHashSet<>();
 
-        ChunkPosition chunkPosition = ChunkPosition.of(chunk);
-        Location cornerLocation = WorldBlocks.getChunkBlock(chunkPosition, 0, 100, 0);
+        Location cornerLocation;
+        try (ChunkPosition chunkPosition = ChunkPosition.of(chunk)) {
+            cornerLocation = WorldBlocks.getChunkBlock(chunkPosition, 0, 100, 0);
+        }
 
         Island island;
 
@@ -640,8 +666,20 @@ public class GridManagerImpl extends Manager implements GridManager {
 
         Log.debug(Debug.SORT_ISLANDS, sortingType.getName());
 
+        boolean isSortedAlready = activeSortingTasks.get().readAndGet(
+                activeSortingTasks -> activeSortingTasks.contains(sortingType));
+        if (isSortedAlready) {
+            if (onFinish != null)
+                onFinish.run();
+            forceSort = false;
+            return;
+        }
+
+        activeSortingTasks.get().write(activeSortingTasks -> activeSortingTasks.add(sortingType));
+
         this.islandsContainer.sortIslands(sortingType, forceSort, () -> {
             plugin.getMenus().refreshTopIslands(sortingType);
+            activeSortingTasks.get().write(activeSortingTasks -> activeSortingTasks.remove(sortingType));
             if (onFinish != null)
                 onFinish.run();
         });
@@ -667,6 +705,9 @@ public class GridManagerImpl extends Manager implements GridManager {
         Preconditions.checkNotNull(dimension, "dimension parameter cannot be null.");
 
         if (island.isSpawn()) {
+            if (island instanceof SpawnIsland)
+                return ((SpawnIsland) island).getSpawnWorld();
+
             return island.getIslandHome(dimension).getWorld();
         }
 
@@ -698,6 +739,9 @@ public class GridManagerImpl extends Manager implements GridManager {
         Preconditions.checkNotNull(dimension, "dimension parameter cannot be null.");
 
         if (island.isSpawn()) {
+            if (island instanceof SpawnIsland)
+                return ((SpawnIsland) island).getSpawnWorldInfo();
+
             return WorldInfo.of(island.getIslandHome(dimension).getWorld());
         }
 
@@ -723,6 +767,9 @@ public class GridManagerImpl extends Manager implements GridManager {
         Preconditions.checkNotNull(worldName, "worldName parameter cannot be null.");
 
         if (island.isSpawn()) {
+            if (island instanceof SpawnIsland)
+                return ((SpawnIsland) island).getSpawnWorldInfo();
+
             return WorldInfo.of(island.getIslandHome(Dimensions.NORMAL).getWorld());
         }
 
@@ -782,7 +829,9 @@ public class GridManagerImpl extends Manager implements GridManager {
     @Deprecated
     public int getBlockAmount(Block block) {
         Preconditions.checkNotNull(block, "block parameter cannot be null.");
-        return getBlockAmount(block.getLocation());
+        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+            return getBlockAmount(block.getLocation(wrapper.getHandle()));
+        }
     }
 
     @Override
@@ -823,6 +872,17 @@ public class GridManagerImpl extends Manager implements GridManager {
         for (int i = 0; i < islands.size(); i++) {
             islands.get(i).calcIslandWorth(null, i + 1 < islands.size() ? null : callback);
         }
+    }
+
+    public void startCalcTask() {
+        this.activeCalcTasks.incrementAndGet();
+    }
+
+    public boolean stopCalcTask() {
+        int activeCalcTasks = this.activeCalcTasks.decrementAndGet();
+        if (activeCalcTasks < 0)
+            throw new IllegalStateException();
+        return activeCalcTasks == 0;
     }
 
     @Override

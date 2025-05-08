@@ -6,6 +6,8 @@ import com.bgsoftware.superiorskyblock.SuperiorSkyblockPlugin;
 import com.bgsoftware.superiorskyblock.api.island.Island;
 import com.bgsoftware.superiorskyblock.api.key.Key;
 import com.bgsoftware.superiorskyblock.api.wrappers.SuperiorPlayer;
+import com.bgsoftware.superiorskyblock.core.ObjectsPools;
+import com.bgsoftware.superiorskyblock.core.Text;
 import com.bgsoftware.superiorskyblock.core.formatting.Formatters;
 import com.bgsoftware.superiorskyblock.core.formatting.impl.ChatFormatter;
 import com.bgsoftware.superiorskyblock.core.io.ClassProcessor;
@@ -16,6 +18,7 @@ import com.bgsoftware.superiorskyblock.nms.v1_20_3.menu.MenuBrewingStandBlockEnt
 import com.bgsoftware.superiorskyblock.nms.v1_20_3.menu.MenuDispenserBlockEntity;
 import com.bgsoftware.superiorskyblock.nms.v1_20_3.menu.MenuFurnaceBlockEntity;
 import com.bgsoftware.superiorskyblock.nms.v1_20_3.menu.MenuHopperBlockEntity;
+import com.bgsoftware.superiorskyblock.nms.v1_20_3.world.BlockEntityCache;
 import com.bgsoftware.superiorskyblock.nms.v1_20_3.world.KeyBlocksCache;
 import io.papermc.paper.chat.ChatRenderer;
 import net.kyori.adventure.audience.Audience;
@@ -35,6 +38,8 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.Registry;
+import org.bukkit.block.data.Ageable;
+import org.bukkit.block.data.BlockData;
 import org.bukkit.command.defaults.BukkitCommand;
 import org.bukkit.craftbukkit.v1_20_R3.CraftRegistry;
 import org.bukkit.craftbukkit.v1_20_R3.CraftServer;
@@ -57,6 +62,7 @@ import org.jetbrains.annotations.NotNull;
 
 import java.util.EnumMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.function.BiFunction;
 
 public class NMSAlgorithmsImpl implements NMSAlgorithms {
@@ -65,6 +71,8 @@ public class NMSAlgorithmsImpl implements NMSAlgorithms {
 
     private static final ReflectField<Map<NamespacedKey, Enchantment>> REGISTRY_CACHE =
             new ReflectField<>(CraftRegistry.class, Map.class, "cache");
+
+    private static final Enchantment GLOW_ENCHANT = initializeGlowEnchantment();
 
     private static final EnumMap<InventoryType, MenuCreator> MENUS_HOLDER_CREATORS = new EnumMap<>(InventoryType.class);
 
@@ -103,8 +111,11 @@ public class NMSAlgorithmsImpl implements NMSAlgorithms {
             return 0;
 
         ServerLevel serverLevel = ((CraftWorld) bukkitWorld).getHandle();
-        BlockPos blockPos = new BlockPos(location.getBlockX(), location.getBlockY(), location.getBlockZ());
-        BlockState blockState = serverLevel.getBlockState(blockPos);
+        BlockState blockState;
+        try (ObjectsPools.Wrapper<BlockPos.MutableBlockPos> wrapper = NMSUtils.BLOCK_POS_POOL.obtain()) {
+            wrapper.getHandle().set(location.getBlockX(), location.getBlockY(), location.getBlockZ());
+            blockState = serverLevel.getBlockState(wrapper.getHandle());
+        }
         return Block.getId(blockState);
     }
 
@@ -125,10 +136,43 @@ public class NMSAlgorithmsImpl implements NMSAlgorithms {
     }
 
     @Override
+    public Optional<String> getTileEntityIdFromCombinedId(int combinedId) {
+        BlockState blockState = Block.stateById(combinedId);
+
+        if (!blockState.hasBlockEntity())
+            return Optional.empty();
+
+        String id = BlockEntityCache.getBlockEntityId(blockState);
+
+        return Text.isBlank(id) ? Optional.empty() : Optional.of(id);
+    }
+
+    @Override
     public int compareMaterials(Material o1, Material o2) {
         int firstMaterial = o1.isBlock() ? Block.getId(CraftMagicNumbers.getBlock(o1).defaultBlockState()) : o1.ordinal();
         int secondMaterial = o2.isBlock() ? Block.getId(CraftMagicNumbers.getBlock(o2).defaultBlockState()) : o2.ordinal();
         return Integer.compare(firstMaterial, secondMaterial);
+    }
+
+    @Override
+    public short getBlockDataValue(org.bukkit.block.BlockState blockState) {
+        BlockData blockData = blockState.getBlockData();
+        return (short) (blockData instanceof Ageable ? ((Ageable) blockData).getAge() : 0);
+    }
+
+    @Override
+    public short getBlockDataValue(org.bukkit.block.Block block) {
+        BlockData blockData = block.getBlockData();
+        return (short) (blockData instanceof Ageable ? ((Ageable) blockData).getAge() : 0);
+    }
+
+    @Override
+    public short getMaxBlockDataValue(Material material) {
+        if (!material.isBlock())
+            return 0;
+
+        BlockData blockData = Bukkit.createBlockData(material);
+        return (short) (blockData instanceof Ageable ? ((Ageable) blockData).getMaximumAge() : 0);
     }
 
     @Override
@@ -169,23 +213,8 @@ public class NMSAlgorithmsImpl implements NMSAlgorithms {
     }
 
     @Override
-    public Enchantment getGlowEnchant() {
-        try {
-            return new PaperGlowEnchantment("superior_glowing_enchant");
-        } catch (Throwable error) {
-            return new SpigotGlowEnchantment("superior_glowing_enchant");
-        }
-    }
-
-    @Override
-    public Enchantment createGlowEnchantment() {
-        Enchantment enchantment = getGlowEnchant();
-
-        Map<NamespacedKey, Enchantment> registryCache = REGISTRY_CACHE.get(Registry.ENCHANTMENT);
-
-        registryCache.put(enchantment.getKey(), enchantment);
-
-        return enchantment;
+    public void makeItemGlow(ItemMeta itemMeta) {
+        itemMeta.addEnchant(GLOW_ENCHANT, 1, true);
     }
 
     @Nullable
@@ -227,6 +256,22 @@ public class NMSAlgorithmsImpl implements NMSAlgorithms {
 
         io.papermc.paper.chat.ChatRenderer originalRenderer = asyncChatEvent.renderer();
         asyncChatEvent.renderer(new ChatRendererWrapper(originalRenderer).renderer);
+    }
+
+    private static Enchantment initializeGlowEnchantment() {
+        Enchantment glowEnchant;
+
+        try {
+            glowEnchant = new PaperGlowEnchantment("superiorskyblock_glowing_enchant");
+        } catch (Throwable error) {
+            glowEnchant = new SpigotGlowEnchantment("superiorskyblock_glowing_enchant");
+        }
+
+        Map<NamespacedKey, Enchantment> registryCache = REGISTRY_CACHE.get(Registry.ENCHANTMENT);
+
+        registryCache.put(glowEnchant.getKey(), glowEnchant);
+
+        return glowEnchant;
     }
 
     private interface MenuCreator extends BiFunction<InventoryHolder, String, Container> {

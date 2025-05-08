@@ -2,9 +2,11 @@ package com.bgsoftware.superiorskyblock.nms.v1_12_R1;
 
 import com.bgsoftware.superiorskyblock.SuperiorSkyblockPlugin;
 import com.bgsoftware.superiorskyblock.api.key.Key;
+import com.bgsoftware.superiorskyblock.core.ObjectsPools;
+import com.bgsoftware.superiorskyblock.core.Text;
 import com.bgsoftware.superiorskyblock.core.key.ConstantKeys;
 import com.bgsoftware.superiorskyblock.nms.NMSAlgorithms;
-import com.bgsoftware.superiorskyblock.nms.v1_12_R1.algorithms.GlowEnchantment;
+import com.bgsoftware.superiorskyblock.nms.v1_12_R1.world.BlockEntityCache;
 import com.bgsoftware.superiorskyblock.nms.v1_12_R1.world.KeyBlocksCache;
 import net.minecraft.server.v1_12_R1.Block;
 import net.minecraft.server.v1_12_R1.BlockPosition;
@@ -19,6 +21,7 @@ import net.minecraft.server.v1_12_R1.World;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.block.BlockState;
 import org.bukkit.command.defaults.BukkitCommand;
 import org.bukkit.craftbukkit.v1_12_R1.CraftServer;
 import org.bukkit.craftbukkit.v1_12_R1.CraftWorld;
@@ -27,6 +30,7 @@ import org.bukkit.craftbukkit.v1_12_R1.entity.CraftMinecart;
 import org.bukkit.craftbukkit.v1_12_R1.inventory.CraftItemStack;
 import org.bukkit.craftbukkit.v1_12_R1.util.CraftChatMessage;
 import org.bukkit.enchantments.Enchantment;
+import org.bukkit.enchantments.EnchantmentTarget;
 import org.bukkit.entity.FallingBlock;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.inventory.InventoryHolder;
@@ -34,9 +38,12 @@ import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.PotionMeta;
 import org.bukkit.potion.PotionEffect;
 
+import java.lang.reflect.Field;
 import java.util.Optional;
 
 public class NMSAlgorithmsImpl implements NMSAlgorithms {
+
+    private static final Enchantment GLOW_ENCHANT = initializeGlowEnchantment();
 
     private final SuperiorSkyblockPlugin plugin;
 
@@ -57,7 +64,11 @@ public class NMSAlgorithmsImpl implements NMSAlgorithms {
     @Override
     public int getCombinedId(Location location) {
         World world = ((CraftWorld) location.getWorld()).getHandle();
-        IBlockData blockData = world.getType(new BlockPosition(location.getBlockX(), location.getBlockY(), location.getBlockZ()));
+        IBlockData blockData;
+        try (ObjectsPools.Wrapper<BlockPosition.MutableBlockPosition> wrapper = NMSUtils.BLOCK_POS_POOL.obtain()) {
+            wrapper.getHandle().setValues(location.getBlockX(), location.getBlockY(), location.getBlockZ());
+            blockData = world.getType(wrapper.getHandle());
+        }
         return Block.getCombinedId(blockData);
     }
 
@@ -68,8 +79,35 @@ public class NMSAlgorithmsImpl implements NMSAlgorithms {
     }
 
     @Override
+    public Optional<String> getTileEntityIdFromCombinedId(int combinedId) {
+        IBlockData blockData = Block.getByCombinedId(combinedId);
+
+        if (!blockData.getBlock().isTileEntity())
+            return Optional.empty();
+
+        String id = BlockEntityCache.getTileEntityId(blockData);
+
+        return Text.isBlank(id) ? Optional.empty() : Optional.of(id);
+    }
+
+    @Override
     public int compareMaterials(Material o1, Material o2) {
         return Integer.compare(o1.ordinal(), o2.ordinal());
+    }
+
+    @Override
+    public short getBlockDataValue(BlockState blockState) {
+        return blockState.getRawData();
+    }
+
+    @Override
+    public short getBlockDataValue(org.bukkit.block.Block block) {
+        return block.getData();
+    }
+
+    @Override
+    public short getMaxBlockDataValue(Material material) {
+        return 0;
     }
 
     @Override
@@ -109,8 +147,8 @@ public class NMSAlgorithmsImpl implements NMSAlgorithms {
     }
 
     @Override
-    public Enchantment getGlowEnchant() {
-        return GlowEnchantment.createEnchantment();
+    public void makeItemGlow(ItemMeta itemMeta) {
+        itemMeta.addEnchant(GLOW_ENCHANT, 1, true);
     }
 
     @Override
@@ -137,6 +175,69 @@ public class NMSAlgorithmsImpl implements NMSAlgorithms {
     @Override
     public Object createMenuInventoryHolder(InventoryType inventoryType, InventoryHolder defaultHolder, String title) {
         return defaultHolder;
+    }
+
+    private static Enchantment initializeGlowEnchantment() {
+        int enchantId = 100;
+        while (Enchantment.getById(enchantId) != null)
+            ++enchantId;
+
+        Enchantment glowEnchant = new Enchantment(enchantId) {
+            @Override
+            public String getName() {
+                return "WildBusterGlow";
+            }
+
+            @Override
+            public int getMaxLevel() {
+                return 1;
+            }
+
+            @Override
+            public int getStartLevel() {
+                return 0;
+            }
+
+            @Override
+            public EnchantmentTarget getItemTarget() {
+                return null;
+            }
+
+            @Override
+            public boolean isTreasure() {
+                return false;
+            }
+
+            @Override
+            public boolean isCursed() {
+                return false;
+            }
+
+            @Override
+            public boolean conflictsWith(Enchantment enchantment) {
+                return false;
+            }
+
+            @Override
+            public boolean canEnchantItem(org.bukkit.inventory.ItemStack itemStack) {
+                return true;
+            }
+        };
+
+        try {
+            Field field = Enchantment.class.getDeclaredField("acceptingNew");
+            field.setAccessible(true);
+            field.set(null, true);
+            field.setAccessible(false);
+        } catch (Exception ignored) {
+        }
+
+        try {
+            Enchantment.registerEnchantment(glowEnchant);
+        } catch (Exception ignored) {
+        }
+
+        return glowEnchant;
     }
 
 }

@@ -7,8 +7,13 @@ import com.bgsoftware.superiorskyblock.api.island.Island;
 import com.bgsoftware.superiorskyblock.api.island.IslandChunkFlags;
 import com.bgsoftware.superiorskyblock.api.world.Dimension;
 import com.bgsoftware.superiorskyblock.api.world.WorldInfo;
+import com.bgsoftware.superiorskyblock.api.wrappers.SuperiorPlayer;
 import com.bgsoftware.superiorskyblock.core.ChunkPosition;
-import com.bgsoftware.superiorskyblock.core.events.EventResult;
+import com.bgsoftware.superiorskyblock.core.IslandWorlds;
+import com.bgsoftware.superiorskyblock.core.ObjectsPools;
+import com.bgsoftware.superiorskyblock.core.events.args.PluginEventArgs;
+import com.bgsoftware.superiorskyblock.core.events.plugin.PluginEvent;
+import com.bgsoftware.superiorskyblock.core.events.plugin.PluginEventsFactory;
 import com.bgsoftware.superiorskyblock.core.logging.Debug;
 import com.bgsoftware.superiorskyblock.core.logging.Log;
 import com.bgsoftware.superiorskyblock.core.threads.BukkitExecutor;
@@ -23,10 +28,10 @@ import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
 import org.bukkit.entity.Entity;
 
-import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.List;
+import java.util.LinkedList;
 import java.util.Objects;
+import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
@@ -67,6 +72,15 @@ public class EntityTeleports {
     }
 
     public static CompletableFuture<Location> findIslandSafeLocation(Island island, Dimension dimension) {
+        CompletableFuture<Location> result = new CompletableFuture<>();
+        IslandWorlds.accessIslandWorldAsync(island, dimension, islandWorldResult -> {
+            islandWorldResult.ifRight(result::completeExceptionally).ifLeft(world ->
+                    findIslandSafeLocation(island, dimension, result));
+        });
+        return result;
+    }
+
+    public static void findIslandSafeLocation(Island island, Dimension dimension, CompletableFuture<Location> result) {
         Location homeLocation = island.getIslandHome(dimension);
 
         Preconditions.checkNotNull(homeLocation, "Cannot find a suitable home location for island " +
@@ -83,7 +97,8 @@ public class EntityTeleports {
             Block homeLocationBlock = homeLocation.getBlock();
             if (island.isSpawn() || WorldBlocks.isSafeBlock(homeLocationBlock)) {
                 Log.debugResult(Debug.FIND_SAFE_TELEPORT, "Result Location", homeLocation);
-                return CompletableFuture.completedFuture(homeLocation);
+                result.complete(homeLocation);
+                return;
             }
         }
 
@@ -91,12 +106,10 @@ public class EntityTeleports {
         {
             Block teleportLocationHighestBlock = islandsWorld.getHighestBlockAt(homeLocation).getRelative(BlockFace.UP);
             if (WorldBlocks.isSafeBlock(teleportLocationHighestBlock)) {
-                return CompletableFuture.completedFuture(adjustLocationToHome(island,
-                        teleportLocationHighestBlock, rotationYaw, rotationPitch));
+                result.complete(adjustLocationToHome(island, teleportLocationHighestBlock, rotationYaw, rotationPitch));
+                return;
             }
         }
-
-        CompletableFuture<Location> result = new CompletableFuture<>();
 
         // The teleport location is not safe. We check for a safe spot in the center of the island.
 
@@ -127,19 +140,18 @@ public class EntityTeleports {
         } else {
             findNewSafeSpotOnIsland(island, islandsWorld, homeLocation, rotationYaw, rotationPitch, result);
         }
-
-        return result;
     }
 
     private static void findNewSafeSpotOnIsland(Island island, World islandsWorld, Location homeLocation,
                                                 float rotationYaw, float rotationPitch, CompletableFuture<Location> result) {
-        ChunkPosition homeChunk = ChunkPosition.of(homeLocation);
-
-        List<ChunkPosition> islandChunks = new ArrayList<>(IslandUtils.getChunkCoords(island,
+        LinkedList<ChunkPosition> islandChunks = new LinkedList<>(IslandUtils.getChunkCoords(island,
                 WorldInfo.of(islandsWorld), IslandChunkFlags.ONLY_PROTECTED | IslandChunkFlags.NO_EMPTY_CHUNKS));
-        islandChunks.sort(Comparator.comparingInt(o -> o.distanceSquared(homeChunk)));
 
-        findSafeSpotInChunk(island, islandChunks, 0, islandsWorld, homeLocation, safeSpot -> {
+        try (ChunkPosition homeChunk = ChunkPosition.of(homeLocation)) {
+            islandChunks.sort(Comparator.comparingInt(o -> o.distanceSquared(homeChunk)));
+        }
+
+        findSafeSpotInChunk(island, islandChunks, islandsWorld, homeLocation, safeSpot -> {
             if (safeSpot != null) {
                 result.complete(adjustLocationToHome(island, safeSpot.getBlock(), rotationYaw, rotationPitch));
             } else {
@@ -148,20 +160,19 @@ public class EntityTeleports {
         });
     }
 
-    private static void findSafeSpotInChunk(Island island, List<ChunkPosition> islandChunks, int index,
-                                            World islandsWorld, Location homeLocation, Consumer<Location> onResult) {
-        if (index >= islandChunks.size()) {
+    private static void findSafeSpotInChunk(Island island, Queue<ChunkPosition> islandChunks, World islandsWorld,
+                                            Location homeLocation, Consumer<Location> onResult) {
+        ChunkPosition chunkPosition = islandChunks.poll();
+        if (chunkPosition == null) {
             onResult.accept(null);
             return;
         }
-
-        ChunkPosition chunkPosition = islandChunks.get(index);
 
         ChunksProvider.loadChunk(chunkPosition, ChunkLoadReason.FIND_SAFE_SPOT, null).whenComplete((chunk, err) -> {
             ChunkSnapshot chunkSnapshot = chunk.getChunkSnapshot();
 
             if (WorldBlocks.isChunkEmpty(island, chunkSnapshot)) {
-                findSafeSpotInChunk(island, islandChunks, index + 1, islandsWorld, homeLocation, onResult);
+                findSafeSpotInChunk(island, islandChunks, islandsWorld, homeLocation, onResult);
                 return;
             }
 
@@ -207,7 +218,7 @@ public class EntityTeleports {
                 if (location != null) {
                     onResult.accept(location);
                 } else {
-                    findSafeSpotInChunk(island, islandChunks, index + 1, islandsWorld, homeLocation, onResult);
+                    findSafeSpotInChunk(island, islandChunks, islandsWorld, homeLocation, onResult);
                 }
             });
 
@@ -222,17 +233,18 @@ public class EntityTeleports {
     private static Location adjustLocationToHome(Island island, Block block, float yaw, float pitch) {
         Location newHomeLocation;
 
-        {
-            Location location = block.getLocation().add(0.5, 0, 0.5);
+        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+            Location location = block.getLocation(wrapper.getHandle()).add(0.5, 0, 0.5);
             location.setYaw(yaw);
             location.setPitch(pitch);
-            EventResult<Location> eventResult = plugin.getEventsBus().callIslandSetHomeEvent(island, location,
-                    IslandSetHomeEvent.Reason.SAFE_HOME, null);
 
-            if (eventResult.isCancelled()) {
+            PluginEvent<PluginEventArgs.IslandSetHome> event = PluginEventsFactory.callIslandSetHomeEvent(
+                    island, (SuperiorPlayer) null, location, IslandSetHomeEvent.Reason.SAFE_HOME);
+
+            if (event.isCancelled()) {
                 newHomeLocation = location;
             } else {
-                newHomeLocation = eventResult.getResult();
+                newHomeLocation = event.getArgs().islandHome;
                 island.setIslandHome(newHomeLocation);
             }
         }
