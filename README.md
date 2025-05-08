@@ -1,3 +1,4 @@
+# /coop /trust is made permanent in this version!
 <p align="center">
 <img src="https://bg-software.com/imgs/superiorskyblock-logo.png" />
 <h2 align="center">The most optimized Skyblock core on the market.</h2>
