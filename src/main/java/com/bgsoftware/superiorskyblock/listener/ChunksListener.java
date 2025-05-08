@@ -4,9 +4,11 @@ import com.bgsoftware.superiorskyblock.SuperiorSkyblockPlugin;
 import com.bgsoftware.superiorskyblock.api.island.Island;
 import com.bgsoftware.superiorskyblock.api.service.world.WorldRecordService;
 import com.bgsoftware.superiorskyblock.api.world.Dimension;
+import com.bgsoftware.superiorskyblock.api.wrappers.BlockPosition;
 import com.bgsoftware.superiorskyblock.api.wrappers.SuperiorPlayer;
 import com.bgsoftware.superiorskyblock.core.ChunkPosition;
 import com.bgsoftware.superiorskyblock.core.LazyReference;
+import com.bgsoftware.superiorskyblock.core.ObjectsPools;
 import com.bgsoftware.superiorskyblock.core.SequentialListBuilder;
 import com.bgsoftware.superiorskyblock.core.collections.ArrayMap;
 import com.bgsoftware.superiorskyblock.core.mutable.MutableBoolean;
@@ -16,6 +18,10 @@ import com.bgsoftware.superiorskyblock.island.algorithm.DefaultIslandCalculation
 import com.bgsoftware.superiorskyblock.module.BuiltinModules;
 import com.bgsoftware.superiorskyblock.module.upgrades.type.UpgradeTypeCropGrowth;
 import com.bgsoftware.superiorskyblock.module.upgrades.type.UpgradeTypeEntityLimits;
+import com.bgsoftware.superiorskyblock.platform.event.GameEvent;
+import com.bgsoftware.superiorskyblock.platform.event.GameEventPriority;
+import com.bgsoftware.superiorskyblock.platform.event.GameEventType;
+import com.bgsoftware.superiorskyblock.platform.event.args.GameEventArgs;
 import org.bukkit.Chunk;
 import org.bukkit.Location;
 import org.bukkit.World;
@@ -24,12 +30,6 @@ import org.bukkit.block.Block;
 import org.bukkit.entity.ArmorStand;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
-import org.bukkit.event.EventHandler;
-import org.bukkit.event.EventPriority;
-import org.bukkit.event.Listener;
-import org.bukkit.event.world.ChunkLoadEvent;
-import org.bukkit.event.world.ChunkUnloadEvent;
-import org.bukkit.event.world.WorldUnloadEvent;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -39,11 +39,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-public class ChunksListener implements Listener {
+public class ChunksListener extends AbstractGameEventListener {
 
     private final Map<UUID, Set<Chunk>> pendingLoadedChunks = new ArrayMap<>();
 
-    private final SuperiorSkyblockPlugin plugin;
     private final LazyReference<WorldRecordService> worldRecordService = new LazyReference<WorldRecordService>() {
         @Override
         protected WorldRecordService create() {
@@ -52,20 +51,27 @@ public class ChunksListener implements Listener {
     };
 
     public ChunksListener(SuperiorSkyblockPlugin plugin) {
-        this.plugin = plugin;
+        super(plugin);
+
+        registerCallback(GameEventType.CHUNK_UNLOAD_EVENT, GameEventPriority.MONITOR, this::onChunkUnload);
+        registerCallback(GameEventType.WORLD_UNLOAD_EVENT, GameEventPriority.MONITOR, this::onWorldUnload);
+        registerCallback(GameEventType.CHUNK_LOAD_EVENT, GameEventPriority.MONITOR, this::onChunkLoad);
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onChunkUnloadMonitor(ChunkUnloadEvent e) {
-        handleChunkUnload(e.getChunk());
+    private void onChunkUnload(GameEvent<GameEventArgs.ChunkUnloadEvent> e) {
+        handleChunkUnload(e.getArgs().chunk);
     }
 
-
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
-    private void onWorldUnload(WorldUnloadEvent e) {
-        for (Chunk loadedChunk : e.getWorld().getLoadedChunks())
+    private void onWorldUnload(GameEvent<GameEventArgs.WorldUnloadEvent> e) {
+        for (Chunk loadedChunk : e.getArgs().world.getLoadedChunks())
             handleChunkUnload(loadedChunk);
     }
+
+    private void onChunkLoad(GameEvent<GameEventArgs.ChunkLoadEvent> e) {
+        handleChunkLoad(e.getArgs().chunk, e.getArgs().isNewChunk);
+    }
+
+    /* INTERNAL */
 
     private void handleChunkUnload(Chunk chunk) {
         if (!plugin.getGrid().isIslandsWorld(chunk.getWorld()))
@@ -90,26 +96,21 @@ public class ChunksListener implements Listener {
         Arrays.stream(chunk.getEntities()).forEach(this.worldRecordService.get()::recordEntityDespawn);
     }
 
-    @EventHandler
-    private void onChunkLoad(ChunkLoadEvent e) {
-        handleChunkLoad(e.getChunk(), e.isNewChunk());
-    }
-
     private void handleChunkLoad(Chunk chunk, boolean isNewChunk) {
         if (!plugin.getGrid().isIslandsWorld(chunk.getWorld()))
             return;
 
         List<Island> chunkIslands = plugin.getGrid().getIslandsAt(chunk);
         chunkIslands.forEach(island -> {
-            if (!island.isSpawn())
-                handleIslandChunkLoad(island, chunk, isNewChunk);
+            if (!island.isSpawn()) {
+                try (ChunkPosition chunkPosition = ChunkPosition.of(chunk)) {
+                    handleIslandChunkLoad(island, chunk, chunkPosition, isNewChunk);
+                }
+            }
         });
     }
 
-    private void handleIslandChunkLoad(Island island, Chunk chunk, boolean isNewChunk) {
-        ChunkPosition chunkPosition = ChunkPosition.of(chunk);
-
-
+    private void handleIslandChunkLoad(Island island, Chunk chunk, ChunkPosition chunkPosition, boolean isNewChunk) {
         World world = chunk.getWorld();
         Dimension dimension = plugin.getGrid().getIslandsWorldDimension(world);
 
@@ -120,7 +121,7 @@ public class ChunksListener implements Listener {
                 List<Player> playersToUpdate = new SequentialListBuilder<Player>()
                         .filter(player -> player.getWorld().equals(world))
                         .build(island.getAllPlayersInside(), SuperiorPlayer::asPlayer);
-                plugin.getNMSChunks().setBiome(Collections.singletonList(ChunkPosition.of(chunk)), island.getBiome(), playersToUpdate);
+                plugin.getNMSChunks().setBiome(Collections.singletonList(chunkPosition), island.getBiome(), playersToUpdate);
             }
         }
 
@@ -136,12 +137,12 @@ public class ChunksListener implements Listener {
         if (!plugin.getNMSChunks().isChunkEmpty(chunk))
             island.markChunkDirty(world, chunk.getX(), chunk.getZ(), true);
 
-        Location islandCenter = island.getCenter(dimension);
+        BlockPosition islandCenter = island.getCenterPosition();
 
         boolean entityLimitsEnabled = BuiltinModules.UPGRADES.isUpgradeTypeEnabled(UpgradeTypeEntityLimits.class);
         MutableBoolean recalculateEntities = new MutableBoolean(false);
 
-        if (chunk.getX() == (islandCenter.getBlockX() >> 4) && chunk.getZ() == (islandCenter.getBlockZ() >> 4)) {
+        if (chunk.getX() == (islandCenter.getX() >> 4) && chunk.getZ() == (islandCenter.getZ() >> 4)) {
             if (dimension == plugin.getSettings().getWorlds().getDefaultWorldDimension()) {
                 Block chunkBlock = chunk.getBlock(0, 100, 0);
                 island.setBiome(world.getBiome(chunkBlock.getX(), chunkBlock.getZ()), false);
@@ -151,7 +152,11 @@ public class ChunksListener implements Listener {
                 recalculateEntities.set(true);
         }
 
-        plugin.getStackedBlocks().updateStackedBlockHolograms(chunk);
+        BukkitExecutor.sync(() -> {
+            if (chunk.isLoaded())
+                // Update holograms of stacked blocks in delay so the chunk is entirely loaded.
+                plugin.getStackedBlocks().updateStackedBlockHolograms(chunk);
+        }, 10L);
 
         BukkitExecutor.sync(() -> {
             if (!pendingLoadedChunksForIsland.remove(chunk) || !chunk.isLoaded())
@@ -161,11 +166,13 @@ public class ChunksListener implements Listener {
             if (!island.getEntitiesTracker().canRecalculateEntityCounts())
                 recalculateEntities.set(false);
 
-            for (Entity entity : chunk.getEntities()) {
-                // We want to delete old holograms of stacked blocks + count entities for the chunk
-                if (entity instanceof ArmorStand && isOldHologram((ArmorStand) entity) &&
-                        plugin.getStackedBlocks().getStackedBlockAmount(entity.getLocation().subtract(0, 1, 0)) > 1) {
-                    entity.remove();
+            try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+                for (Entity entity : chunk.getEntities()) {
+                    // We want to delete old holograms of stacked blocks + count entities for the chunk
+                    if (entity instanceof ArmorStand && isOldHologram((ArmorStand) entity) &&
+                            plugin.getStackedBlocks().getStackedBlockAmount(entity.getLocation(wrapper.getHandle()).subtract(0, 1, 0)) > 1) {
+                        entity.remove();
+                    }
                 }
             }
 

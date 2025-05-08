@@ -23,6 +23,7 @@ import com.bgsoftware.superiorskyblock.config.section.VoidTeleportSection;
 import com.bgsoftware.superiorskyblock.config.section.WorldsSection;
 import com.bgsoftware.superiorskyblock.core.Manager;
 import com.bgsoftware.superiorskyblock.core.errors.ManagerLoadException;
+import com.bgsoftware.superiorskyblock.core.events.plugin.PluginEventsFactory;
 import com.bgsoftware.superiorskyblock.core.logging.Log;
 import org.bukkit.Location;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -81,6 +82,8 @@ public class SettingsManagerImpl extends Manager implements SettingsManager {
         }
 
         loadContainerFromConfig(cfg);
+
+        PluginEventsFactory.callSettingsUpdateEvent();
     }
 
     @Override
@@ -571,6 +574,16 @@ public class SettingsManagerImpl extends Manager implements SettingsManager {
     @Override
     public BigInteger getBlockCountsSaveThreshold() {
         return this.global.getBlockCountsSaveThreshold();
+    }
+
+    @Override
+    public boolean getChatSigningSupport() {
+        return this.global.getChatSigningSupport();
+    }
+
+    @Override
+    public int getCommandsPerPage() {
+        return this.global.getCommandsPerPage();
     }
 
     public void updateValue(String path, Object value) throws IOException {

@@ -1,9 +1,12 @@
 package com.bgsoftware.superiorskyblock.nms.v1_17;
 
+import com.bgsoftware.common.annotations.Nullable;
 import com.bgsoftware.common.reflection.ReflectField;
 import com.bgsoftware.common.reflection.ReflectMethod;
 import com.bgsoftware.superiorskyblock.SuperiorSkyblockPlugin;
 import com.bgsoftware.superiorskyblock.core.ChunkPosition;
+import com.bgsoftware.superiorskyblock.core.ObjectsPool;
+import com.bgsoftware.superiorskyblock.core.ObjectsPools;
 import com.bgsoftware.superiorskyblock.core.collections.CompletableFutureList;
 import com.bgsoftware.superiorskyblock.core.logging.Log;
 import com.bgsoftware.superiorskyblock.core.threads.BukkitExecutor;
@@ -38,6 +41,8 @@ import net.minecraft.world.level.chunk.UpgradeData;
 import net.minecraft.world.level.chunk.storage.EntityStorage;
 import net.minecraft.world.level.chunk.storage.IOWorker;
 import net.minecraft.world.level.levelgen.Heightmap;
+import org.bukkit.Location;
+import org.bukkit.World;
 import org.bukkit.craftbukkit.v1_17_R1.CraftWorld;
 
 import java.lang.reflect.Modifier;
@@ -67,8 +72,28 @@ public class NMSUtils {
 
     private static final List<CompletableFuture<Void>> PENDING_CHUNK_ACTIONS = new LinkedList<>();
 
+    public static final ObjectsPool<ObjectsPools.Wrapper<BlockPos.MutableBlockPos>> BLOCK_POS_POOL =
+            ObjectsPools.createNewPool(() -> new BlockPos.MutableBlockPos(0, 0, 0));
+
     private NMSUtils() {
 
+    }
+
+    @Nullable
+    public static <T extends BlockEntity> T getBlockEntityAt(Location location, Class<T> type) {
+        World bukkitWorld = location.getWorld();
+
+        if (bukkitWorld == null)
+            return null;
+
+        ServerLevel serverLevel = ((CraftWorld) bukkitWorld).getHandle();
+
+        try (ObjectsPools.Wrapper<BlockPos.MutableBlockPos> wrapper = NMSUtils.BLOCK_POS_POOL.obtain()) {
+            BlockPos.MutableBlockPos blockPos = wrapper.getHandle();
+            blockPos.set(location.getBlockX(), location.getBlockY(), location.getBlockZ());
+            BlockEntity blockEntity = serverLevel.getBlockEntity(blockPos);
+            return !type.isInstance(blockEntity) ? null : type.cast(blockEntity);
+        }
     }
 
     public static void runActionOnEntityChunks(Collection<ChunkPosition> chunksCoords,
@@ -103,7 +128,7 @@ public class NMSUtils {
             if (chunkAccess instanceof LevelChunk levelChunk) {
                 loadedChunks.add(levelChunk);
             } else {
-                unloadedChunks.add(chunkPosition);
+                unloadedChunks.add(chunkPosition.copy());
             }
         });
 
@@ -185,6 +210,7 @@ public class NMSUtils {
     private static void runActionOnUnloadedEntityChunks(Collection<ChunkPosition> chunks,
                                                         ChunkCallback chunkCallback) {
         CompletableFutureList<Void> workerChunks = new CompletableFutureList<>(-1);
+
         chunks.forEach(chunkPosition -> {
             ServerLevel serverLevel = ((CraftWorld) chunkPosition.getWorld()).getHandle();
             IOWorker worker = ENTITY_STORAGE_WORKER.get(serverLevel.entityManager.permanentStorage);
@@ -204,12 +230,16 @@ public class NMSUtils {
                 }
             });
         });
-        workerChunks.forEachCompleted(pair -> {
-            // Wait for all chunks to load.
-        }, error -> {
-            Log.error(error, "An unexpected error occurred while interacting with an unloaded chunk:");
+
+        BukkitExecutor.createTask().runAsync(v -> {
+            workerChunks.forEachCompleted(pair -> {
+                // Wait for all chunks to load.
+            }, error -> {
+                Log.error(error, "An unexpected error occurred while interacting with an unloaded chunk:");
+            });
+        }).runSync(v -> {
+            chunkCallback.onFinish();
         });
-        chunkCallback.onFinish();
     }
 
     public static List<CompletableFuture<Void>> getPendingChunkActions() {

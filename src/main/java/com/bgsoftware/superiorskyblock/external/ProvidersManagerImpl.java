@@ -25,6 +25,7 @@ import com.bgsoftware.superiorskyblock.api.key.Key;
 import com.bgsoftware.superiorskyblock.api.service.placeholders.PlaceholdersService;
 import com.bgsoftware.superiorskyblock.api.wrappers.SuperiorPlayer;
 import com.bgsoftware.superiorskyblock.core.ChunkPosition;
+import com.bgsoftware.superiorskyblock.core.JavaVersion;
 import com.bgsoftware.superiorskyblock.core.LazyReference;
 import com.bgsoftware.superiorskyblock.core.Manager;
 import com.bgsoftware.superiorskyblock.core.key.Keys;
@@ -33,6 +34,7 @@ import com.bgsoftware.superiorskyblock.core.logging.Log;
 import com.bgsoftware.superiorskyblock.core.threads.BukkitExecutor;
 import com.bgsoftware.superiorskyblock.external.async.AsyncProvider;
 import com.bgsoftware.superiorskyblock.external.async.AsyncProvider_Default;
+import com.bgsoftware.superiorskyblock.external.blocks.ICustomBlocksProvider;
 import com.bgsoftware.superiorskyblock.external.chunks.ChunksProvider_Default;
 import com.bgsoftware.superiorskyblock.external.economy.EconomyProvider_Default;
 import com.bgsoftware.superiorskyblock.external.menus.MenusProvider_Default;
@@ -54,6 +56,7 @@ import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.plugin.Plugin;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
@@ -95,6 +98,7 @@ public class ProvidersManagerImpl extends Manager implements ProvidersManager {
     private final List<ISkinsListener> skinsListeners = new LinkedList<>();
     private final List<IStackedBlocksListener> stackedBlocksListeners = new LinkedList<>();
     private final List<IWorldsListener> worldsListeners = new LinkedList<>();
+    private final List<ICustomBlocksProvider> customBlocksProviders = new LinkedList<>();
 
     public ProvidersManagerImpl(SuperiorSkyblockPlugin plugin) {
         super(plugin);
@@ -118,6 +122,9 @@ public class ProvidersManagerImpl extends Manager implements ProvidersManager {
             registerPlaceholdersProvider();
             registerChunksProvider();
         });
+
+        registerMessageProviders();
+
         // We try to forcefully load prices after a second the server has enabled.
         BukkitExecutor.sync(this::forcePricesLoad, 60L);
     }
@@ -286,6 +293,14 @@ public class ProvidersManagerImpl extends Manager implements ProvidersManager {
         this.stackedBlocksListeners.remove(stackedBlocksListener);
     }
 
+    public void registerCustomBlocksProvider(ICustomBlocksProvider customBlocksProvider) {
+        this.customBlocksProviders.add(customBlocksProvider);
+    }
+
+    public List<ICustomBlocksProvider> getCustomBlocksProviders() {
+        return customBlocksProviders;
+    }
+
     public void addPricesLoadCallback(Runnable callback) {
         if (this.pricesLoadCallbacks == null) {
             callback.run();
@@ -432,8 +447,13 @@ public class ProvidersManagerImpl extends Manager implements ProvidersManager {
         if (canRegisterHook("CoreProtect"))
             registerHook("CoreProtectHook");
 
-        if (canRegisterHook("SlimeWorldManager"))
-            registerHook("SlimeWorldManagerHook");
+        if (isHookEnabled("SlimeWorldManager") && JavaVersion.isAtLeast(17)) {
+            if (isOldSlimeWorldManager()) {
+                registerHook("SlimeWorldManagerHook");
+            } else {
+                registerHook("AdvancedSlimePaperHook");
+            }
+        }
 
         if (canRegisterHook("ProtocolLib"))
             registerHook("ProtocolLibHook");
@@ -441,11 +461,28 @@ public class ProvidersManagerImpl extends Manager implements ProvidersManager {
         if (Bukkit.getPluginManager().isPluginEnabled("Oraxen"))
             registerHook("OraxenHook");
 
+        if (Bukkit.getPluginManager().isPluginEnabled("Nexo"))
+            registerHook("NexoHook");
+
         if (Bukkit.getPluginManager().isPluginEnabled("ItemsAdder"))
             registerHook("ItemsAdderHook");
 
         if (canRegisterHook("SmoothTimber"))
             registerHook("SmoothTimberHook");
+
+        if (canRegisterHook("SilkSpawners")) {
+            List<String> pluginAuthors = Bukkit.getPluginManager().getPlugin("SilkSpawners").getDescription().getAuthors();
+            if (pluginAuthors.contains("mushroomhostage")) {
+                registerHook("TimbruSilkSpawnersHook");
+            }
+        }
+
+    }
+
+    private void registerMessageProviders() {
+        if (isHookEnabled("MiniMessage") && hasMiniMessageSupport()) {
+            registerHook("MiniMessageHook");
+        }
     }
 
     private void registerSpawnersProvider() {
@@ -468,9 +505,13 @@ public class ProvidersManagerImpl extends Manager implements ProvidersManager {
                 (auto || configSpawnersProvider.equalsIgnoreCase("WildStacker"))) {
             spawnersProvider = createInstance("spawners.SpawnersProvider_WildStacker");
         } else if (canRegisterHook("SilkSpawners") &&
-                Bukkit.getPluginManager().getPlugin("SilkSpawners").getDescription().getAuthors().contains("CandC_9_12") &&
                 (auto || configSpawnersProvider.equalsIgnoreCase("SilkSpawners"))) {
-            spawnersProvider = createInstance("spawners.SpawnersProvider_SilkSpawners");
+            Plugin silkSpawnersPlugin = Bukkit.getPluginManager().getPlugin("SilkSpawners");
+            if (silkSpawnersPlugin.getDescription().getAuthors().contains("CandC_9_12")) {
+                spawnersProvider = createInstance("spawners.SpawnersProvider_CandcSilkSpawners");
+            } else if (silkSpawnersPlugin.getDescription().getAuthors().contains("mushroomhostage")) {
+                spawnersProvider = createInstance("spawners.SpawnersProvider_TimbruSilkSpawners");
+            }
         } else if (canRegisterHook("PvpingSpawners") &&
                 (auto || configSpawnersProvider.equalsIgnoreCase("PvpingSpawners"))) {
             spawnersProvider = createInstance("spawners.SpawnersProvider_PvpingSpawners");
@@ -639,12 +680,31 @@ public class ProvidersManagerImpl extends Manager implements ProvidersManager {
             Method registerMethod = clazz.getMethod("register", SuperiorSkyblockPlugin.class);
             registerMethod.invoke(null, plugin);
         } catch (Throwable error) {
-            Log.error(error, "An unexpected error occurred while registering hook ", className, ":");
+            if (error.getClass() != UnsupportedClassVersionError.class)
+                Log.error(error, "An unexpected error occurred while registering hook ", className, ":");
         }
     }
 
     private static boolean hasPaperAsyncSupport() {
         return new ReflectMethod<>(World.class, "getChunkAtAsync", int.class, int.class).isValid();
+    }
+
+    private static boolean isOldSlimeWorldManager() {
+        try {
+            Class.forName("com.grinderwolf.swm.api.SlimePlugin");
+            return true;
+        } catch (ClassNotFoundException error) {
+            return false;
+        }
+    }
+
+    private static boolean hasMiniMessageSupport() {
+        try {
+            Class.forName("net.kyori.adventure.text.minimessage.MiniMessage");
+            return true;
+        } catch (ClassNotFoundException error) {
+            return false;
+        }
     }
 
     private <T> Optional<T> createInstance(String className) {

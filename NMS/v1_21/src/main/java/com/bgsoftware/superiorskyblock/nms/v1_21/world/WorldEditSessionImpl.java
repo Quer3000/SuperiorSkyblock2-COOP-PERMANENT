@@ -6,6 +6,7 @@ import com.bgsoftware.superiorskyblock.api.island.Island;
 import com.bgsoftware.superiorskyblock.api.objects.Pair;
 import com.bgsoftware.superiorskyblock.api.world.Dimension;
 import com.bgsoftware.superiorskyblock.core.ChunkPosition;
+import com.bgsoftware.superiorskyblock.core.ObjectsPool;
 import com.bgsoftware.superiorskyblock.core.Text;
 import com.bgsoftware.superiorskyblock.core.collections.CollectionsFactory;
 import com.bgsoftware.superiorskyblock.core.collections.view.Long2ObjectMapView;
@@ -19,10 +20,12 @@ import com.bgsoftware.superiorskyblock.tag.IntArrayTag;
 import com.bgsoftware.superiorskyblock.tag.StringTag;
 import com.bgsoftware.superiorskyblock.tag.Tag;
 import com.bgsoftware.superiorskyblock.world.generator.IslandsGenerator;
+import com.google.gson.JsonParseException;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
+import net.minecraft.nbt.ListTag;
 import net.minecraft.nbt.NbtOps;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.MinecraftServer;
@@ -61,10 +64,13 @@ import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Supplier;
 
 public class WorldEditSessionImpl implements WorldEditSession {
+
+    private static final ObjectsPool<WorldEditSessionImpl> POOL = new ObjectsPool<>(WorldEditSessionImpl::new);
 
     private static final SuperiorSkyblockPlugin plugin = SuperiorSkyblockPlugin.getPlugin();
     private static final boolean isStarLightInterface = ((Supplier<Boolean>) () -> {
@@ -80,12 +86,20 @@ public class WorldEditSessionImpl implements WorldEditSession {
     private final List<Pair<BlockPos, BlockState>> blocksToUpdate = new LinkedList<>();
     private final List<Pair<BlockPos, CompoundTag>> blockEntities = new LinkedList<>();
     private final Set<ChunkPos> lightenChunks = isStarLightInterface ? new HashSet<>() : Collections.emptySet();
-    private final ServerLevel serverLevel;
-    private final Dimension dimension;
+    private ServerLevel serverLevel;
+    private Dimension dimension;
 
-    public WorldEditSessionImpl(ServerLevel serverLevel) {
+    public static WorldEditSessionImpl obtain(ServerLevel serverLevel) {
+        return POOL.obtain().initialize(serverLevel);
+    }
+
+    private WorldEditSessionImpl() {
+    }
+
+    public WorldEditSessionImpl initialize(ServerLevel serverLevel) {
         this.serverLevel = serverLevel;
         this.dimension = plugin.getProviders().getWorldsProvider().getIslandsWorldDimension(serverLevel.getWorld());
+        return this;
     }
 
     @Override
@@ -154,20 +168,24 @@ public class WorldEditSessionImpl implements WorldEditSession {
 
     @Override
     public List<ChunkPosition> getAffectedChunks() {
+        if (chunks.isEmpty())
+            return Collections.emptyList();
+
         List<ChunkPosition> chunkPositions = new LinkedList<>();
         World bukkitWorld = serverLevel.getWorld();
         LongIterator iterator = chunks.keyIterator();
         while (iterator.hasNext()) {
             long chunkKey = iterator.next();
-            ChunkPos chunkPos = new ChunkPos(chunkKey);
-            chunkPositions.add(ChunkPosition.of(bukkitWorld, chunkPos.x, chunkPos.z));
+            int chunkX = (int) chunkKey;
+            int chunkZ = (int) (chunkKey >> 32);
+            chunkPositions.add(ChunkPosition.of(bukkitWorld, chunkX, chunkZ, false));
         }
         return chunkPositions;
     }
 
     @Override
     public void applyBlocks(Chunk bukkitChunk) {
-        LevelChunk levelChunk = NMSUtils.getCraftChunkHandle((CraftChunk) bukkitChunk);
+        LevelChunk levelChunk = Objects.requireNonNull(NMSUtils.getCraftChunkHandle((CraftChunk) bukkitChunk));
         ChunkPos chunkPos = levelChunk.getPos();
 
         long chunkKey = chunkPos.toLong();
@@ -213,32 +231,9 @@ public class WorldEditSessionImpl implements WorldEditSession {
                 blockEntityCompound.putInt("y", blockPos.getY());
                 blockEntityCompound.putInt("z", blockPos.getZ());
 
-                Component[] signLines = new Component[4];
-                Arrays.fill(signLines, Component.empty());
-                boolean hasAnySignLines = false;
-                // We try to convert old text sign lines
-                for (int i = 1; i <= 4; ++i) {
-                    if (blockEntityCompound.contains("SSB.Text" + i)) {
-                        String signLine = blockEntityCompound.getString("SSB.Text" + i);
-                        if (!Text.isBlank(signLine)) {
-                            signLines[i - 1] = CraftChatMessage.fromString(signLine)[0];
-                            hasAnySignLines = true;
-                        }
-                    } else {
-                        String signLine = blockEntityCompound.getString("Text" + i);
-                        if (!Text.isBlank(signLine)) {
-                            signLines[i - 1] = CraftChatMessage.fromJSON(signLine);
-                            hasAnySignLines = true;
-                        }
-                    }
-
-                }
-
-                if (hasAnySignLines) {
-                    SignText signText = new SignText(signLines, signLines, DyeColor.BLACK, false);
-                    SignText.DIRECT_CODEC.encodeStart(NbtOps.INSTANCE, signText).result()
-                            .ifPresent(frontTextNBT -> blockEntityCompound.put("front_text", frontTextNBT));
-                }
+                applySignTextLines(blockEntityCompound, "front_text");
+                applySignTextLines(blockEntityCompound, "back_text");
+                convertLegacySignTextLines(blockEntityCompound);
 
                 BlockEntity worldBlockEntity = serverLevel.getBlockEntity(blockPos);
                 if (worldBlockEntity != null)
@@ -254,12 +249,73 @@ public class WorldEditSessionImpl implements WorldEditSession {
             this.lightenChunks.clear();
         }
 
+        release();
+    }
+
+    @Override
+    public void release() {
+        this.chunks.clear();
+        this.blocksToUpdate.clear();
+        this.blockEntities.clear();
+        this.lightenChunks.clear();
+        this.serverLevel = null;
+        this.dimension = null;
+        POOL.release(this);
     }
 
     private boolean isValidPosition(BlockPos blockPos) {
         return blockPos.getX() >= -30000000 && blockPos.getZ() >= -30000000 &&
                 blockPos.getX() < 30000000 && blockPos.getZ() < 30000000 &&
                 blockPos.getY() >= serverLevel.getMinBuildHeight() && blockPos.getY() < serverLevel.getMaxBuildHeight();
+    }
+
+    private static void applySignTextLines(net.minecraft.nbt.CompoundTag blockEntityCompound, String key) {
+        if (blockEntityCompound.contains(key)) {
+            net.minecraft.nbt.CompoundTag frontText = blockEntityCompound.getCompound(key);
+            ListTag messages = frontText.getList("messages", net.minecraft.nbt.Tag.TAG_STRING);
+            Component[] frontTextLines = new Component[messages.size()];
+            Arrays.fill(frontTextLines, Component.empty());
+            int i = 0;
+            for (net.minecraft.nbt.Tag lineTag : messages) {
+                try {
+                    frontTextLines[i++] = CraftChatMessage.fromJSON(lineTag.getAsString());
+                } catch (JsonParseException error) {
+                    frontTextLines[i++] = CraftChatMessage.fromString(lineTag.getAsString())[0];
+                }
+            }
+
+            SignText signText = new SignText(frontTextLines, frontTextLines, DyeColor.BLACK, false);
+            SignText.DIRECT_CODEC.encodeStart(NbtOps.INSTANCE, signText).result()
+                    .ifPresent(frontTextNBT -> blockEntityCompound.put(key, frontTextNBT));
+        }
+    }
+
+    private static void convertLegacySignTextLines(net.minecraft.nbt.CompoundTag blockEntityCompound) {
+        Component[] signLines = new Component[4];
+        Arrays.fill(signLines, Component.empty());
+        boolean hasAnySignLines = false;
+        // We try to convert old text sign lines
+        for (int i = 1; i <= 4; ++i) {
+            if (blockEntityCompound.contains("SSB.Text" + i)) {
+                String signLine = blockEntityCompound.getString("SSB.Text" + i);
+                if (!Text.isBlank(signLine)) {
+                    signLines[i - 1] = CraftChatMessage.fromString(signLine)[0];
+                    hasAnySignLines = true;
+                }
+            } else {
+                String signLine = blockEntityCompound.getString("Text" + i);
+                if (!Text.isBlank(signLine)) {
+                    signLines[i - 1] = CraftChatMessage.fromJSON(signLine);
+                    hasAnySignLines = true;
+                }
+            }
+        }
+
+        if (hasAnySignLines) {
+            SignText signText = new SignText(signLines, signLines, DyeColor.BLACK, false);
+            SignText.DIRECT_CODEC.encodeStart(NbtOps.INSTANCE, signText).result()
+                    .ifPresent(frontTextNBT -> blockEntityCompound.put("front_text", frontTextNBT));
+        }
     }
 
     private class ChunkData {

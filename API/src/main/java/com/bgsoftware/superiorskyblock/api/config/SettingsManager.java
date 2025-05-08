@@ -628,6 +628,18 @@ public interface SettingsManager {
      */
     BigInteger getBlockCountsSaveThreshold();
 
+    /**
+     * Support for chat-signing in 1.19+.
+     * Config-path: chat-signing-support
+     */
+    boolean getChatSigningSupport();
+
+    /**
+     * Amount of commands to be listed in the `/is help` and `/is admin` commands.
+     * Config-path: commands-per-page
+     */
+    int getCommandsPerPage();
+
     interface Database {
 
         /**

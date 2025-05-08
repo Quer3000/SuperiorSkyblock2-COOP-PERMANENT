@@ -11,13 +11,14 @@ import com.bgsoftware.superiorskyblock.core.ChunkPosition;
 import com.bgsoftware.superiorskyblock.core.Counter;
 import com.bgsoftware.superiorskyblock.core.collections.Chunk2ObjectMap;
 import com.bgsoftware.superiorskyblock.core.key.KeyIndicator;
-import com.bgsoftware.superiorskyblock.core.key.KeyMaps;
+import com.bgsoftware.superiorskyblock.core.key.map.KeyMaps;
 import com.bgsoftware.superiorskyblock.core.key.Keys;
 import com.bgsoftware.superiorskyblock.core.logging.Log;
 import com.bgsoftware.superiorskyblock.core.threads.BukkitExecutor;
 import com.bgsoftware.superiorskyblock.core.threads.Synchronized;
 import com.bgsoftware.superiorskyblock.nms.NMSChunks;
-import com.bgsoftware.superiorskyblock.nms.v1_19.chunks.CropsBlockEntity;
+import com.bgsoftware.superiorskyblock.nms.v1_19.crops.CropsBlockEntity;
+import com.bgsoftware.superiorskyblock.nms.v1_19.crops.CropsTickingMethod;
 import com.bgsoftware.superiorskyblock.nms.v1_19.world.KeyBlocksCache;
 import com.bgsoftware.superiorskyblock.world.BukkitEntities;
 import com.bgsoftware.superiorskyblock.world.generator.IslandsGenerator;
@@ -45,6 +46,7 @@ import net.minecraft.world.level.biome.Biomes;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.SlabBlock;
+import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.SlabType;
 import net.minecraft.world.level.chunk.ChunkAccess;
@@ -73,7 +75,7 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
-import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
 public class NMSChunksImpl implements NMSChunks {
@@ -86,6 +88,7 @@ public class NMSChunksImpl implements NMSChunks {
     public NMSChunksImpl(SuperiorSkyblockPlugin plugin) {
         this.plugin = plugin;
         KeyBlocksCache.cacheAllBlocks();
+        CropsTickingMethod.register();
     }
 
     @Override
@@ -176,9 +179,7 @@ public class NMSChunksImpl implements NMSChunks {
                 }
 
                 removeEntities(levelChunk);
-
-                levelChunk.blockEntities.keySet().clear();
-
+                removeBlockEntities(levelChunk);
                 removeBlocks(levelChunk);
             }
 
@@ -310,7 +311,7 @@ public class NMSChunksImpl implements NMSChunks {
             @Override
             public void onLoadedChunk(LevelChunk levelChunk) {
                 ChunkPos chunkPos = levelChunk.getPos();
-                ChunkPosition chunkPosition = ChunkPosition.of(levelChunk.level.getWorld(), chunkPos.x, chunkPos.z);
+                ChunkPosition chunkPosition = ChunkPosition.of(levelChunk.level.getWorld(), chunkPos.x, chunkPos.z, false);
                 allCalculatedChunks.add(calculateChunk(chunkPosition, levelChunk.getSections()));
             }
 
@@ -408,7 +409,7 @@ public class NMSChunksImpl implements NMSChunks {
 
             @Override
             public void onFinish() {
-                BukkitExecutor.sync(() -> {
+                BukkitExecutor.ensureMain(() -> {
                     for (NMSUtils.UnloadedChunkCompound unloadedChunkCompound : unloadedChunkCompounds) {
                         ServerLevel serverLevel = unloadedChunkCompound.serverLevel();
 
@@ -447,7 +448,7 @@ public class NMSChunksImpl implements NMSChunks {
     @Override
     public boolean isChunkEmpty(org.bukkit.Chunk bukkitChunk) {
         LevelChunk levelChunk = NMSUtils.getCraftChunkHandle((CraftChunk) bukkitChunk);
-        return Arrays.stream(levelChunk.getSections()).allMatch(chunkSection ->
+        return levelChunk != null && Arrays.stream(levelChunk.getSections()).allMatch(chunkSection ->
                 chunkSection == null || chunkSection.hasOnlyAir());
     }
 
@@ -469,7 +470,7 @@ public class NMSChunksImpl implements NMSChunks {
             if (cropsBlockEntity != null)
                 cropsBlockEntity.remove();
         } else {
-            LevelChunk levelChunk = NMSUtils.getCraftChunkHandle((CraftChunk) chunk);
+            LevelChunk levelChunk = Objects.requireNonNull(NMSUtils.getCraftChunkHandle((CraftChunk) chunk));
             CropsBlockEntity.create(island, levelChunk);
         }
     }
@@ -495,7 +496,7 @@ public class NMSChunksImpl implements NMSChunks {
 
     @Override
     public List<Location> getBlockEntities(Chunk chunk) {
-        LevelChunk levelChunk = NMSUtils.getCraftChunkHandle((CraftChunk) chunk);
+        LevelChunk levelChunk = Objects.requireNonNull(NMSUtils.getCraftChunkHandle((CraftChunk) chunk));
         List<Location> blockEntities = new LinkedList<>();
 
         World bukkitWorld = chunk.getWorld();
@@ -574,6 +575,11 @@ public class NMSChunksImpl implements NMSChunks {
             if (!(nmsEntity instanceof Player))
                 nmsEntity.setRemoved(Entity.RemovalReason.DISCARDED);
         });
+    }
+
+    private static void removeBlockEntities(ChunkAccess chunk) {
+        chunk.blockEntities.values().forEach(BlockEntity::setRemoved);
+        chunk.blockEntities.clear();
     }
 
     private static void removeBlocks(ChunkAccess chunk) {

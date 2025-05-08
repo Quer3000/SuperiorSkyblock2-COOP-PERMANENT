@@ -1,7 +1,13 @@
 package com.bgsoftware.superiorskyblock.nms.v1_16_R3;
 
 import com.bgsoftware.superiorskyblock.SuperiorSkyblockPlugin;
+import com.bgsoftware.superiorskyblock.api.island.Island;
 import com.bgsoftware.superiorskyblock.api.key.Key;
+import com.bgsoftware.superiorskyblock.api.wrappers.SuperiorPlayer;
+import com.bgsoftware.superiorskyblock.core.ObjectsPools;
+import com.bgsoftware.superiorskyblock.core.Text;
+import com.bgsoftware.superiorskyblock.core.formatting.Formatters;
+import com.bgsoftware.superiorskyblock.core.formatting.impl.ChatFormatter;
 import com.bgsoftware.superiorskyblock.core.io.ClassProcessor;
 import com.bgsoftware.superiorskyblock.nms.NMSAlgorithms;
 import com.bgsoftware.superiorskyblock.nms.algorithms.PaperGlowEnchantment;
@@ -10,7 +16,12 @@ import com.bgsoftware.superiorskyblock.nms.v1_16_R3.menu.MenuTileEntityBrewing;
 import com.bgsoftware.superiorskyblock.nms.v1_16_R3.menu.MenuTileEntityDispenser;
 import com.bgsoftware.superiorskyblock.nms.v1_16_R3.menu.MenuTileEntityFurnace;
 import com.bgsoftware.superiorskyblock.nms.v1_16_R3.menu.MenuTileEntityHopper;
+import com.bgsoftware.superiorskyblock.nms.v1_16_R3.world.BlockEntityCache;
 import com.bgsoftware.superiorskyblock.nms.v1_16_R3.world.KeyBlocksCache;
+import io.papermc.paper.chat.ChatComposer;
+import io.papermc.paper.event.player.AsyncChatEvent;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
 import net.minecraft.server.v1_16_R3.Block;
 import net.minecraft.server.v1_16_R3.BlockPosition;
 import net.minecraft.server.v1_16_R3.EntityFallingBlock;
@@ -19,10 +30,14 @@ import net.minecraft.server.v1_16_R3.IBlockData;
 import net.minecraft.server.v1_16_R3.IChatBaseComponent;
 import net.minecraft.server.v1_16_R3.IInventory;
 import net.minecraft.server.v1_16_R3.IRegistry;
+import net.minecraft.server.v1_16_R3.MinecraftServer;
 import net.minecraft.server.v1_16_R3.World;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.block.BlockState;
+import org.bukkit.block.data.Ageable;
+import org.bukkit.block.data.BlockData;
 import org.bukkit.command.defaults.BukkitCommand;
 import org.bukkit.craftbukkit.v1_16_R3.CraftServer;
 import org.bukkit.craftbukkit.v1_16_R3.CraftWorld;
@@ -33,17 +48,25 @@ import org.bukkit.craftbukkit.v1_16_R3.util.CraftChatMessage;
 import org.bukkit.craftbukkit.v1_16_R3.util.CraftMagicNumbers;
 import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.FallingBlock;
+import org.bukkit.entity.Player;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.PotionMeta;
 import org.bukkit.potion.PotionEffect;
+import org.jetbrains.annotations.NotNull;
 
+import java.lang.reflect.Field;
 import java.util.EnumMap;
+import java.util.Optional;
 import java.util.function.BiFunction;
 
 public class NMSAlgorithmsImpl implements NMSAlgorithms {
+
+    private static final SuperiorSkyblockPlugin plugin = SuperiorSkyblockPlugin.getPlugin();
+
+    private static final Enchantment GLOW_ENCHANT = initializeGlowEnchantment();
 
     private static final EnumMap<InventoryType, MenuCreator> MENUS_HOLDER_CREATORS = new EnumMap<>(InventoryType.class);
 
@@ -64,12 +87,6 @@ public class NMSAlgorithmsImpl implements NMSAlgorithms {
         }
     };
 
-    private final SuperiorSkyblockPlugin plugin;
-
-    public NMSAlgorithmsImpl(SuperiorSkyblockPlugin plugin) {
-        this.plugin = plugin;
-    }
-
     @Override
     public void registerCommand(BukkitCommand command) {
         ((CraftServer) plugin.getServer()).getCommandMap().register("superiorskyblock2", command);
@@ -83,7 +100,11 @@ public class NMSAlgorithmsImpl implements NMSAlgorithms {
     @Override
     public int getCombinedId(Location location) {
         World world = ((CraftWorld) location.getWorld()).getHandle();
-        IBlockData blockData = world.getType(new BlockPosition(location.getBlockX(), location.getBlockY(), location.getBlockZ()));
+        IBlockData blockData;
+        try (ObjectsPools.Wrapper<BlockPosition.MutableBlockPosition> wrapper = NMSUtils.BLOCK_POS_POOL.obtain()) {
+            wrapper.getHandle().setValues(location.getBlockX(), location.getBlockY(), location.getBlockZ());
+            blockData = world.getType(wrapper.getHandle());
+        }
         return Block.getCombinedId(blockData);
     }
 
@@ -104,10 +125,43 @@ public class NMSAlgorithmsImpl implements NMSAlgorithms {
     }
 
     @Override
+    public Optional<String> getTileEntityIdFromCombinedId(int combinedId) {
+        IBlockData blockData = Block.getByCombinedId(combinedId);
+
+        if (!blockData.getBlock().isTileEntity())
+            return Optional.empty();
+
+        String id = BlockEntityCache.getTileEntityId(blockData);
+
+        return Text.isBlank(id) ? Optional.empty() : Optional.of(id);
+    }
+
+    @Override
     public int compareMaterials(Material o1, Material o2) {
         int firstMaterial = o1.isBlock() ? Block.getCombinedId(CraftMagicNumbers.getBlock(o1).getBlockData()) : o1.ordinal();
         int secondMaterial = o2.isBlock() ? Block.getCombinedId(CraftMagicNumbers.getBlock(o2).getBlockData()) : o2.ordinal();
         return Integer.compare(firstMaterial, secondMaterial);
+    }
+
+    @Override
+    public short getBlockDataValue(BlockState blockState) {
+        BlockData blockData = blockState.getBlockData();
+        return (short) (blockData instanceof Ageable ? ((Ageable) blockData).getAge() : 0);
+    }
+
+    @Override
+    public short getBlockDataValue(org.bukkit.block.Block block) {
+        BlockData blockData = block.getBlockData();
+        return (short) (blockData instanceof Ageable ? ((Ageable) blockData).getAge() : 0);
+    }
+
+    @Override
+    public short getMaxBlockDataValue(Material material) {
+        if (!material.isBlock())
+            return 0;
+
+        BlockData blockData = Bukkit.createBlockData(material);
+        return (short) (blockData instanceof Ageable ? ((Ageable) blockData).getMaximumAge() : 0);
     }
 
     @Override
@@ -148,12 +202,8 @@ public class NMSAlgorithmsImpl implements NMSAlgorithms {
     }
 
     @Override
-    public Enchantment getGlowEnchant() {
-        try {
-            return new PaperGlowEnchantment("superior_glowing_enchant");
-        } catch (Throwable error) {
-            return new SpigotGlowEnchantment("superior_glowing_enchant");
-        }
+    public void makeItemGlow(ItemMeta itemMeta) {
+        itemMeta.addEnchant(GLOW_ENCHANT, 1, true);
     }
 
     @Override
@@ -163,7 +213,12 @@ public class NMSAlgorithmsImpl implements NMSAlgorithms {
 
     @Override
     public double getCurrentTps() {
-        return Bukkit.getTPS()[0];
+        try {
+            return MinecraftServer.getServer().tps1.getAverage();
+        } catch (Throwable error) {
+            //noinspection removal
+            return MinecraftServer.getServer().recentTps[0];
+        }
     }
 
     @Override
@@ -177,12 +232,74 @@ public class NMSAlgorithmsImpl implements NMSAlgorithms {
     }
 
     @Override
+    public void handlePaperChatRenderer(Object event) {
+        if (!(event instanceof AsyncChatEvent))
+            return;
+
+        ChatComposer originalComposer = ((AsyncChatEvent) event).composer();
+        ((AsyncChatEvent) event).composer(new ChatComposerWrapper(originalComposer).composer);
+    }
+
+    @Override
     public Object createMenuInventoryHolder(InventoryType inventoryType, InventoryHolder defaultHolder, String title) {
         MenuCreator menuCreator = MENUS_HOLDER_CREATORS.get(inventoryType);
         return menuCreator == null ? null : menuCreator.apply(defaultHolder, title);
     }
 
+    private static Enchantment initializeGlowEnchantment() {
+        Enchantment glowEnchant;
+
+        try {
+            glowEnchant = new PaperGlowEnchantment("superiorskyblock_glowing_enchant");
+        } catch (Throwable error) {
+            glowEnchant = new SpigotGlowEnchantment("superiorskyblock_glowing_enchant");
+        }
+
+        try {
+            Field field = Enchantment.class.getDeclaredField("acceptingNew");
+            field.setAccessible(true);
+            field.set(null, true);
+            field.setAccessible(false);
+        } catch (Exception ignored) {
+        }
+
+        try {
+            Enchantment.registerEnchantment(glowEnchant);
+        } catch (Exception ignored) {
+        }
+
+        return glowEnchant;
+    }
+
     private interface MenuCreator extends BiFunction<InventoryHolder, String, IInventory> {
+
+    }
+
+    private static class ChatComposerWrapper {
+
+        private final ChatComposer composer = new ChatComposer() {
+
+            @Override
+            public @NotNull Component composeChat(@NotNull Player source,
+                                                  @NotNull Component sourceDisplayName,
+                                                  @NotNull Component message) {
+                String originalFormat = LegacyComponentSerializer.legacyAmpersand().serialize(
+                        originalComposer.composeChat(source, sourceDisplayName, message));
+
+                SuperiorPlayer superiorPlayer = plugin.getPlayers().getSuperiorPlayer(source);
+                Island island = superiorPlayer.getIsland();
+
+                return LegacyComponentSerializer.legacyAmpersand().deserialize(
+                        Formatters.CHAT_FORMATTER.format(new ChatFormatter.ChatFormatArgs(originalFormat, superiorPlayer, island)));
+            }
+
+        };
+
+        private final ChatComposer originalComposer;
+
+        public ChatComposerWrapper(ChatComposer originalComposer) {
+            this.originalComposer = originalComposer;
+        }
 
     }
 

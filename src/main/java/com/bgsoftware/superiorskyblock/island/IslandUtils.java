@@ -1,7 +1,6 @@
 package com.bgsoftware.superiorskyblock.island;
 
 import com.bgsoftware.superiorskyblock.SuperiorSkyblockPlugin;
-import com.bgsoftware.superiorskyblock.api.config.SettingsManager;
 import com.bgsoftware.superiorskyblock.api.enums.BorderColor;
 import com.bgsoftware.superiorskyblock.api.island.Island;
 import com.bgsoftware.superiorskyblock.api.island.IslandChunkFlags;
@@ -13,15 +12,18 @@ import com.bgsoftware.superiorskyblock.api.wrappers.BlockPosition;
 import com.bgsoftware.superiorskyblock.api.wrappers.SuperiorPlayer;
 import com.bgsoftware.superiorskyblock.core.ChunkPosition;
 import com.bgsoftware.superiorskyblock.core.EnumHelper;
+import com.bgsoftware.superiorskyblock.core.ObjectsPools;
 import com.bgsoftware.superiorskyblock.core.SequentialListBuilder;
-import com.bgsoftware.superiorskyblock.core.collections.EnumerateMap;
 import com.bgsoftware.superiorskyblock.core.collections.ArrayMap;
+import com.bgsoftware.superiorskyblock.core.collections.EnumerateMap;
+import com.bgsoftware.superiorskyblock.core.events.plugin.PluginEventsFactory;
 import com.bgsoftware.superiorskyblock.core.formatting.Formatters;
 import com.bgsoftware.superiorskyblock.core.messages.Message;
 import com.bgsoftware.superiorskyblock.island.privilege.IslandPrivileges;
 import com.bgsoftware.superiorskyblock.world.chunk.ChunkLoadReason;
 import com.bgsoftware.superiorskyblock.world.chunk.ChunksProvider;
 import org.bukkit.Chunk;
+import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.block.Biome;
 import org.bukkit.event.inventory.InventoryType;
@@ -29,8 +31,6 @@ import org.bukkit.inventory.Inventory;
 
 import java.util.Collection;
 import java.util.Collections;
-import java.util.EnumMap;
-import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -85,7 +85,7 @@ public class IslandUtils {
         for (int x = min.getX() >> 4; x <= max.getX() >> 4; x++) {
             for (int z = min.getZ() >> 4; z <= max.getZ() >> 4; z++) {
                 if (!noEmptyChunks || island.isChunkDirty(worldInfo.getName(), x, z)) {
-                    chunkCoords.add(ChunkPosition.of(worldInfo, x, z));
+                    chunkCoords.add(ChunkPosition.of(worldInfo, x, z, false));
                 }
             }
         }
@@ -115,12 +115,12 @@ public class IslandUtils {
         return chunkCoords;
     }
 
-    public static List<CompletableFuture<Chunk>> getAllChunksAsync(Island island, World world, @IslandChunkFlags int flags,
+    public static List<CompletableFuture<Chunk>> getAllChunksAsync(Island island, WorldInfo worldInfo, @IslandChunkFlags int flags,
                                                                    ChunkLoadReason chunkLoadReason,
                                                                    Consumer<Chunk> onChunkLoad) {
         return new SequentialListBuilder<CompletableFuture<Chunk>>()
                 .mutable()
-                .build(IslandUtils.getChunkCoords(island, WorldInfo.of(world), flags), chunkPosition ->
+                .build(IslandUtils.getChunkCoords(island, worldInfo, flags), chunkPosition ->
                         ChunksProvider.loadChunk(chunkPosition, chunkLoadReason, onChunkLoad));
     }
 
@@ -131,13 +131,13 @@ public class IslandUtils {
 
         for (Dimension dimension : Dimension.values()) {
             if (plugin.getProviders().getWorldsProvider().isDimensionEnabled(dimension) && island.wasSchematicGenerated(dimension)) {
-                World world = island.getCenter(dimension).getWorld();
-                chunkCoords.addAll(getAllChunksAsync(island, world, flags, chunkLoadReason, onChunkLoad));
+                WorldInfo worldInfo = plugin.getGrid().getIslandsWorldInfo(island, dimension);
+                chunkCoords.addAll(getAllChunksAsync(island, worldInfo, flags, chunkLoadReason, onChunkLoad));
             }
         }
 
         for (World registeredWorld : plugin.getGrid().getRegisteredWorlds()) {
-            chunkCoords.addAll(getAllChunksAsync(island, registeredWorld, flags, chunkLoadReason, onChunkLoad));
+            chunkCoords.addAll(getAllChunksAsync(island, WorldInfo.of(registeredWorld), flags, chunkLoadReason, onChunkLoad));
         }
 
         return chunkCoords;
@@ -205,7 +205,7 @@ public class IslandUtils {
     }
 
     public static void handleKickPlayer(SuperiorPlayer caller, String callerName, Island island, SuperiorPlayer target) {
-        if (!plugin.getEventsBus().callIslandKickEvent(caller, target, island))
+        if (!PluginEventsFactory.callIslandKickEvent(island, caller, target))
             return;
 
         island.kickMember(target);
@@ -232,7 +232,7 @@ public class IslandUtils {
     }
 
     public static void handleBanPlayer(SuperiorPlayer caller, Island island, SuperiorPlayer target) {
-        if (!plugin.getEventsBus().callIslandBanEvent(caller, target, island))
+        if (!PluginEventsFactory.callIslandBanEvent(island, caller, target))
             return;
 
         island.banMember(target, caller);
@@ -246,7 +246,7 @@ public class IslandUtils {
         plugin.getNMSChunks().deleteChunks(island, chunkPositions, onFinish);
         chunkPositions.forEach(chunkPosition -> {
             plugin.getStackedBlocks().removeStackedBlocks(chunkPosition);
-            plugin.getEventsBus().callIslandChunkResetEvent(island, chunkPosition);
+            PluginEventsFactory.callIslandChunkResetEvent(island, chunkPosition);
         });
     }
 
@@ -264,18 +264,20 @@ public class IslandUtils {
 
     public static boolean handleBorderColorUpdate(SuperiorPlayer superiorPlayer, BorderColor borderColor) {
         if (!superiorPlayer.hasWorldBorderEnabled()) {
-            if (!plugin.getEventsBus().callPlayerToggleBorderEvent(superiorPlayer))
+            if (!PluginEventsFactory.callPlayerToggleBorderEvent(superiorPlayer))
                 return false;
 
             superiorPlayer.toggleWorldBorder();
         }
 
-        if (!plugin.getEventsBus().callPlayerChangeBorderColorEvent(superiorPlayer, borderColor))
+        if (!PluginEventsFactory.callPlayerChangeBorderColorEvent(superiorPlayer, borderColor))
             return false;
 
         superiorPlayer.setBorderColor(borderColor);
-        plugin.getNMSWorld().setWorldBorder(superiorPlayer,
-                plugin.getGrid().getIslandAt(superiorPlayer.getLocation()));
+        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+            plugin.getNMSWorld().setWorldBorder(superiorPlayer,
+                    plugin.getGrid().getIslandAt(superiorPlayer.getLocation(wrapper.getHandle())));
+        }
 
         Message.BORDER_PLAYER_COLOR_UPDATED.send(superiorPlayer,
                 Formatters.BORDER_COLOR_FORMATTER.format(borderColor, superiorPlayer.getUserLocale()));

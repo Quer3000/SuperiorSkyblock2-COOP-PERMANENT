@@ -10,7 +10,7 @@ import com.bgsoftware.superiorskyblock.core.ChunkPosition;
 import com.bgsoftware.superiorskyblock.core.Counter;
 import com.bgsoftware.superiorskyblock.core.collections.Chunk2ObjectMap;
 import com.bgsoftware.superiorskyblock.core.key.KeyIndicator;
-import com.bgsoftware.superiorskyblock.core.key.KeyMaps;
+import com.bgsoftware.superiorskyblock.core.key.map.KeyMaps;
 import com.bgsoftware.superiorskyblock.core.key.Keys;
 import com.bgsoftware.superiorskyblock.core.threads.Synchronized;
 import com.bgsoftware.superiorskyblock.nms.NMSChunks;
@@ -93,19 +93,7 @@ public class NMSChunksImpl implements NMSChunks {
                 Arrays.fill(chunk.getSections(), null);
 
                 removeEntities(chunk);
-
-                for (Map.Entry<BlockPosition, TileEntity> tileEntityEntry : chunk.tileEntities.entrySet()) {
-                    chunk.world.tileEntityList.remove(tileEntityEntry.getValue());
-                    try {
-                        // This field doesn't exist in Taco 1.8
-                        chunk.world.h.remove(tileEntityEntry.getValue());
-                    } catch (Throwable ignored) {
-                    }
-                    chunk.world.capturedTileEntities.remove(tileEntityEntry.getKey());
-                }
-
-                chunk.tileEntities.clear();
-
+                removeTileEntities(chunk);
                 removeBlocks(chunk);
             }
 
@@ -144,7 +132,7 @@ public class NMSChunksImpl implements NMSChunks {
             @Override
             public void onChunk(Chunk chunk, boolean isLoaded) {
                 World bukkitWorld = chunk.world.getWorld();
-                ChunkPosition chunkPosition = ChunkPosition.of(bukkitWorld, chunk.locX, chunk.locZ);
+                ChunkPosition chunkPosition = ChunkPosition.of(bukkitWorld, chunk.locX, chunk.locZ, false);
 
                 KeyMap<Counter> blockCounts = KeyMaps.createArrayMap(KeyIndicator.MATERIAL);
                 List<Location> spawnersLocations = new LinkedList<>();
@@ -295,6 +283,32 @@ public class NMSChunksImpl implements NMSChunks {
             });
             chunk.entitySlices[i] = new UnsafeList<>();
         }
+    }
+
+    private static void removeTileEntities(Chunk chunk) {
+        boolean hasWorldHField = false;
+
+        try {
+            // This field doesn't exist in Taco 1.8
+            List<TileEntity> tileEntities = chunk.world.h;
+            hasWorldHField = true;
+        } catch (Throwable ignored) {
+        }
+
+        if (hasWorldHField) {
+            chunk.tileEntities.forEach(((blockPosition, tileEntity) -> {
+                chunk.world.tileEntityList.remove(tileEntity);
+                chunk.world.h.remove(tileEntity);
+                chunk.world.capturedTileEntities.remove(blockPosition);
+            }));
+        } else {
+            chunk.tileEntities.forEach(((blockPosition, tileEntity) -> {
+                chunk.world.tileEntityList.remove(tileEntity);
+                chunk.world.capturedTileEntities.remove(blockPosition);
+            }));
+        }
+
+        chunk.tileEntities.clear();
     }
 
     private static void removeBlocks(Chunk chunk) {

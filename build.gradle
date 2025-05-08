@@ -1,11 +1,11 @@
 plugins {
     id 'java'
-    id 'io.github.goooler.shadow' version '8.1.7'
+    id 'io.github.goooler.shadow' version '8.1.8'
     id 'maven-publish'
 }
 
 group 'SuperiorSkyblock'
-version = "2024.3"
+version = "2025.1"
 
 project.ext {
     archiveFolder = file("archive/")
@@ -72,7 +72,7 @@ dependencies {
     implementation 'com.bgsoftware.common.executors:Executors:b3'
     implementation 'com.bgsoftware.common.shopsbridge:ShopsBridge:b11:all@jar'
     implementation 'com.bgsoftware.common.dependencies:DependenciesManager:b2'
-    implementation 'com.bgsoftware.common.nmsloader:NMSLoader:b7'
+    implementation 'com.bgsoftware.common.nmsloader:NMSLoader:b11'
 
     implementation 'com.zaxxer:HikariCP:4.0.3'
     implementation 'org.slf4j:slf4j-api:2.0.5'

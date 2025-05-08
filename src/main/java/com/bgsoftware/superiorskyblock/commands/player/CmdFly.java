@@ -3,9 +3,12 @@ package com.bgsoftware.superiorskyblock.commands.player;
 import com.bgsoftware.superiorskyblock.SuperiorSkyblockPlugin;
 import com.bgsoftware.superiorskyblock.api.island.Island;
 import com.bgsoftware.superiorskyblock.api.wrappers.SuperiorPlayer;
+import com.bgsoftware.superiorskyblock.core.ObjectsPools;
+import com.bgsoftware.superiorskyblock.core.events.plugin.PluginEventsFactory;
 import com.bgsoftware.superiorskyblock.core.messages.Message;
 import com.bgsoftware.superiorskyblock.commands.ISuperiorCommand;
 import com.bgsoftware.superiorskyblock.island.privilege.IslandPrivileges;
+import org.bukkit.Location;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 
@@ -53,11 +56,14 @@ public class CmdFly implements ISuperiorCommand {
     public void execute(SuperiorSkyblockPlugin plugin, CommandSender sender, String[] args) {
         SuperiorPlayer superiorPlayer = plugin.getPlayers().getSuperiorPlayer(sender);
 
-        if (!plugin.getEventsBus().callPlayerToggleFlyEvent(superiorPlayer))
+        if (!PluginEventsFactory.callPlayerToggleFlyEvent(superiorPlayer))
             return;
 
-        Island island = plugin.getGrid().getIslandAt(superiorPlayer.getLocation());
         Player player = (Player) sender;
+        Island island;
+        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+            island = plugin.getGrid().getIslandAt(player.getLocation(wrapper.getHandle()));
+        }
 
         if (superiorPlayer.hasIslandFlyEnabled()) {
             player.setAllowFlight(false);

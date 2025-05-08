@@ -9,6 +9,7 @@ import com.bgsoftware.superiorskyblock.core.logging.Debug;
 import com.bgsoftware.superiorskyblock.core.logging.Log;
 import com.bgsoftware.superiorskyblock.core.profiler.ProfileType;
 import com.bgsoftware.superiorskyblock.core.profiler.Profiler;
+import com.bgsoftware.superiorskyblock.core.threads.BukkitExecutor;
 import org.bukkit.Chunk;
 
 import java.util.HashSet;
@@ -34,12 +35,22 @@ public class ChunksProvider {
 
     public static CompletableFuture<Chunk> loadChunk(ChunkPosition chunkPosition, ChunkLoadReason chunkLoadReason,
                                                      @Nullable Consumer<Chunk> onLoadConsumer) {
+        try {
+            return loadChunkInternal(chunkPosition, chunkLoadReason, onLoadConsumer);
+        } finally {
+            chunkPosition.release();
+        }
+    }
+
+    private static CompletableFuture<Chunk> loadChunkInternal(ChunkPosition chunkPosition, ChunkLoadReason chunkLoadReason,
+                                                     @Nullable Consumer<Chunk> onLoadConsumer) {
         if (stopped)
             return new CompletableFuture<>();
 
         Log.debug(Debug.LOAD_CHUNK, chunkPosition, chunkLoadReason);
 
         Chunk loadedChunk = ChunkPosition.getLoadedChunk(chunkPosition).orElse(null);
+
         if (loadedChunk != null) {
             processPendingChunkLoadRequest(loadedChunk, chunkPosition);
             if (onLoadConsumer != null)
@@ -60,11 +71,15 @@ public class ChunksProvider {
             if (onLoadConsumer != null)
                 chunkConsumers.add(onLoadConsumer);
 
-            pendingRequests.put(chunkPosition, new PendingChunkLoadRequest(completableFuture, chunkConsumers));
-            chunksExecutor.addWorker(new ChunkLoadWorker(chunkPosition, chunkLoadReason));
+            // Copy pool resource
+            ChunkPosition clonedChunkPos = chunkPosition.copy();
 
-            if (!chunksExecutor.isRunning())
-                start();
+            pendingRequests.put(clonedChunkPos, new PendingChunkLoadRequest(completableFuture, chunkConsumers));
+            BukkitExecutor.ensureMain(() -> {
+                chunksExecutor.addWorker(new ChunkLoadWorker(clonedChunkPos, chunkLoadReason));
+                if (!chunksExecutor.isRunning())
+                    start();
+            });
 
             return completableFuture;
         }

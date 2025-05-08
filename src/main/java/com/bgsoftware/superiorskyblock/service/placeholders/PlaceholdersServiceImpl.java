@@ -12,7 +12,9 @@ import com.bgsoftware.superiorskyblock.api.objects.Pair;
 import com.bgsoftware.superiorskyblock.api.service.placeholders.IslandPlaceholderParser;
 import com.bgsoftware.superiorskyblock.api.service.placeholders.PlaceholdersService;
 import com.bgsoftware.superiorskyblock.api.service.placeholders.PlayerPlaceholderParser;
+import com.bgsoftware.superiorskyblock.api.world.WorldInfo;
 import com.bgsoftware.superiorskyblock.api.wrappers.SuperiorPlayer;
+import com.bgsoftware.superiorskyblock.core.ObjectsPools;
 import com.bgsoftware.superiorskyblock.core.formatting.Formatters;
 import com.bgsoftware.superiorskyblock.core.key.ConstantKeys;
 import com.bgsoftware.superiorskyblock.core.key.Keys;
@@ -21,6 +23,7 @@ import com.bgsoftware.superiorskyblock.island.privilege.IslandPrivileges;
 import com.bgsoftware.superiorskyblock.island.top.SortingTypes;
 import com.bgsoftware.superiorskyblock.service.IService;
 import com.google.common.collect.ImmutableMap;
+import org.bukkit.Location;
 import org.bukkit.OfflinePlayer;
 
 import java.time.Duration;
@@ -89,15 +92,15 @@ public class PlaceholdersServiceImpl implements PlaceholdersService, IService {
     private static final Map<String, IslandPlaceholderParser> ISLAND_PARSES =
             new ImmutableMap.Builder<String, IslandPlaceholderParser>()
                     .put("center", (island, superiorPlayer) ->
-                            Formatters.LOCATION_FORMATTER.format(island.getCenter(plugin.getSettings().getWorlds().getDefaultWorldDimension())))
+                            Formatters.BLOCK_POSITION_FORMATTER.format(island.getCenterPosition(), getDefaultWorldInfo(island)))
                     .put("x", (island, superiorPlayer) ->
-                            island.getCenter(plugin.getSettings().getWorlds().getDefaultWorldDimension()).getBlockX() + "")
+                            island.getCenterPosition().getX() + "")
                     .put("y", (island, superiorPlayer) ->
-                            island.getCenter(plugin.getSettings().getWorlds().getDefaultWorldDimension()).getBlockY() + "")
+                            island.getCenterPosition().getY() + "")
                     .put("z", (island, superiorPlayer) ->
-                            island.getCenter(plugin.getSettings().getWorlds().getDefaultWorldDimension()).getBlockZ() + "")
-                    .put("world", (island, superiorPlayer) ->
-                            island.getCenter(plugin.getSettings().getWorlds().getDefaultWorldDimension()).getWorld().getName())
+                            island.getCenterPosition().getZ() + "")
+                    .put("world", (island, superiorPlayer) -> getDefaultWorldInfo(island).getName())
+                    .put("schematic", (island, superiorPlayer) -> island.getSchematicName())
                     .put("team_size", (island, superiorPlayer) -> island.getIslandMembers(true).size() + "")
                     .put("team_size_online", (island, superiorPlayer) ->
                             island.getIslandMembers(true).stream().filter(SuperiorPlayer::isShownAsOnline).count() + "")
@@ -256,8 +259,14 @@ public class PlaceholdersServiceImpl implements PlaceholdersService, IService {
                 IslandPlaceholderParser customIslandParser = CUSTOM_ISLAND_PARSERS.get(
                         isLocationPlaceholder ? placeholder.substring(9) : placeholder);
                 if (customIslandParser != null) {
-                    Island island = isLocationPlaceholder ? plugin.getGrid().getIslandAt(superiorPlayer.getLocation()) :
-                            superiorPlayer.getIsland();
+                    Island island;
+                    if (isLocationPlaceholder) {
+                        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+                            island = plugin.getGrid().getIslandAt(superiorPlayer.getLocation(wrapper.getHandle()));
+                        }
+                    } else {
+                        island = superiorPlayer.getIsland();
+                    }
                     placeholderResult = Optional.ofNullable(customIslandParser.apply(island, superiorPlayer));
                 }
             }
@@ -269,16 +278,37 @@ public class PlaceholdersServiceImpl implements PlaceholdersService, IService {
                 placeholderResult = parsePlaceholdersForPlayer(superiorPlayer, subPlaceholder);
             } else if ((matcher = ISLAND_PLACEHOLDER_PATTERN.matcher(placeholder)).matches()) {
                 String subPlaceholder = matcher.group(1).toLowerCase(Locale.ENGLISH);
-                Island island = superiorPlayer == null ? null : subPlaceholder.startsWith("location_") ?
-                        plugin.getGrid().getIslandAt(superiorPlayer.getLocation()) : superiorPlayer.getIsland();
+                Island island;
+                if (superiorPlayer == null) {
+                    island = null;
+                } else if (subPlaceholder.startsWith("location_")) {
+                    try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+                        island = plugin.getGrid().getIslandAt(superiorPlayer.getLocation(wrapper.getHandle()));
+                    }
+                } else {
+                    island = superiorPlayer.getIsland();
+                }
                 placeholderResult = parsePlaceholdersForIsland(island, superiorPlayer,
                         placeholder.replace("location_", ""),
                         subPlaceholder.replace("location_", ""));
             }
         }
 
-        return placeholderResult.orElse(plugin.getSettings().getDefaultPlaceholders()
-                .getOrDefault(placeholder, ""));
+        if (placeholderResult.isPresent())
+            return placeholderResult.get();
+
+        String defaultPlaceholderValue = plugin.getSettings().getDefaultPlaceholders().get(placeholder);
+        if (defaultPlaceholderValue != null)
+            return defaultPlaceholderValue;
+
+        // We try to look for prefixes of placeholders
+        for (Map.Entry<String, String> entry : plugin.getSettings().getDefaultPlaceholders().entrySet()) {
+            if (placeholder.startsWith(entry.getKey())) {
+                return entry.getValue();
+            }
+        }
+
+        return "";
     }
 
     @Override
@@ -490,6 +520,10 @@ public class PlaceholdersServiceImpl implements PlaceholdersService, IService {
             return Optional.empty();
 
         return Optional.of(members.get(targetMemberIndex).getName());
+    }
+
+    private static WorldInfo getDefaultWorldInfo(Island island) {
+        return plugin.getGrid().getIslandsWorldInfo(island, plugin.getSettings().getWorlds().getDefaultWorldDimension());
     }
 
 }

@@ -9,6 +9,7 @@ import com.bgsoftware.superiorskyblock.commands.CommandTabCompletes;
 import com.bgsoftware.superiorskyblock.commands.IPermissibleCommand;
 import com.bgsoftware.superiorskyblock.commands.arguments.CommandArguments;
 import com.bgsoftware.superiorskyblock.core.ChunkPosition;
+import com.bgsoftware.superiorskyblock.core.events.plugin.PluginEventsFactory;
 import com.bgsoftware.superiorskyblock.core.messages.Message;
 import com.bgsoftware.superiorskyblock.island.privilege.IslandPrivileges;
 import com.bgsoftware.superiorskyblock.island.warp.SignWarp;
@@ -74,13 +75,13 @@ public class CmdDelWarp implements IPermissibleCommand {
         if (islandWarp == null)
             return;
 
-        if (!plugin.getEventsBus().callIslandDeleteWarpEvent(superiorPlayer, island, islandWarp))
+        if (!PluginEventsFactory.callIslandDeleteWarpEvent(island, superiorPlayer, islandWarp))
             return;
 
         island.deleteWarp(islandWarp.getName());
         Message.DELETE_WARP.send(superiorPlayer, islandWarp.getName());
 
-        ChunksProvider.loadChunk(ChunkPosition.of(islandWarp.getLocation()), ChunkLoadReason.WARP_SIGN_BREAK, chunk -> {
+        ChunksProvider.loadChunk(ChunkPosition.of(islandWarp), ChunkLoadReason.WARP_SIGN_BREAK, chunk -> {
             SignWarp.trySignWarpBreak(islandWarp, player);
         });
     }

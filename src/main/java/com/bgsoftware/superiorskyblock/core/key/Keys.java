@@ -5,6 +5,7 @@ import com.bgsoftware.superiorskyblock.SuperiorSkyblockPlugin;
 import com.bgsoftware.superiorskyblock.api.key.Key;
 import com.bgsoftware.superiorskyblock.core.LazyReference;
 import com.bgsoftware.superiorskyblock.core.Materials;
+import com.bgsoftware.superiorskyblock.core.ObjectsPools;
 import com.bgsoftware.superiorskyblock.core.ServerVersion;
 import com.bgsoftware.superiorskyblock.core.Text;
 import com.bgsoftware.superiorskyblock.core.key.types.CustomKey;
@@ -68,11 +69,13 @@ public class Keys {
             CreatureSpawner creatureSpawner = (CreatureSpawner) block.getState();
             baseKey = getSpawnerKeyFromCreatureSpawner(creatureSpawner);
         } else {
-            short data = ServerVersion.isLegacy() ? block.getData() : 0;
+            short data = plugin.getNMSAlgorithms().getBlockDataValue(block);
             baseKey = MaterialKey.of(blockType, data, MaterialKeySource.BLOCK);
         }
 
-        return plugin.getBlockValues().convertKey(baseKey, block.getLocation());
+        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+            return plugin.getBlockValues().convertKey(baseKey, block.getLocation(wrapper.getHandle()));
+        }
     }
 
     public static Key of(BlockState blockState) {
@@ -80,11 +83,13 @@ public class Keys {
         if (blockState instanceof CreatureSpawner) {
             baseKey = getSpawnerKeyFromCreatureSpawner((CreatureSpawner) blockState);
         } else {
-            short data = ServerVersion.isLegacy() ? blockState.getRawData() : 0;
+            short data = plugin.getNMSAlgorithms().getBlockDataValue(blockState);
             baseKey = MaterialKey.of(blockState.getType(), data, MaterialKeySource.BLOCK);
         }
 
-        return plugin.getBlockValues().convertKey(baseKey, blockState.getLocation());
+        try (ObjectsPools.Wrapper<Location> wrapper = ObjectsPools.LOCATION.obtain()) {
+            return plugin.getBlockValues().convertKey(baseKey, blockState.getLocation(wrapper.getHandle()));
+        }
     }
 
     public static Key of(Key baseKey, Location location) {
@@ -97,17 +102,30 @@ public class Keys {
     public static Key of(ItemStack itemStack) {
         Material itemType = itemStack.getType();
         Key baseKey = (itemType == Materials.SPAWNER.toBukkitType()) ?
-                plugin.getProviders().getSpawnerKey(itemStack) : MaterialKey.of(itemType, itemStack.getDurability(), MaterialKeySource.ITEM);
+                plugin.getProviders().getSpawnerKey(itemStack) :
+                MaterialKey.of(itemType, itemStack.getDurability(), MaterialKeySource.ITEM);
         return plugin.getBlockValues().convertKey(baseKey, itemStack);
     }
 
     public static Key of(Material type, short data) {
-        try {
+        if (ServerVersion.isLessThan(ServerVersion.v1_21) || type == Materials.SPAWNER.toBukkitType()) {
             return of(new ItemStack(type, 1, data));
+        }
+
+        // In 1.21, we cannot set invalid durability for ItemStacks.
+        // Therefore, this code is duplicated from the above method, but
+        // creates the baseKey directly, not from ItemStack.
+        Key baseKey = MaterialKey.of(type, data, MaterialKeySource.ITEM);
+
+        try {
+            // Now we try to convert the key.
+            // This may throw an exception that is handled below.
+            ItemStack itemStack = new ItemStack(type, 1, data);
+            return plugin.getBlockValues().convertKey(baseKey, itemStack);
         } catch (IllegalArgumentException error) {
             // In 1.21, you cannot create ItemStack out of Material types that are not an item
-            // If this occurs, then we manually create a new MaterialKey here.
-            return MaterialKey.of(type, data, MaterialKeySource.ITEM);
+            // If this occurs, we simply return the base key.
+            return baseKey;
         }
     }
 

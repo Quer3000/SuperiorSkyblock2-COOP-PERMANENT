@@ -7,11 +7,14 @@ import com.bgsoftware.superiorskyblock.api.commands.SuperiorCommand;
 import com.bgsoftware.superiorskyblock.api.service.message.IMessageComponent;
 import com.bgsoftware.superiorskyblock.api.service.message.MessagesService;
 import com.bgsoftware.superiorskyblock.api.wrappers.SuperiorPlayer;
+import com.bgsoftware.superiorskyblock.commands.CommandsHelper;
 import com.bgsoftware.superiorskyblock.core.LazyReference;
 import com.bgsoftware.superiorskyblock.core.Text;
 import com.bgsoftware.superiorskyblock.core.collections.ArrayMap;
 import com.bgsoftware.superiorskyblock.core.collections.AutoRemovalCollection;
-import com.bgsoftware.superiorskyblock.core.events.EventResult;
+import com.bgsoftware.superiorskyblock.core.events.args.PluginEventArgs;
+import com.bgsoftware.superiorskyblock.core.events.plugin.PluginEvent;
+import com.bgsoftware.superiorskyblock.core.events.plugin.PluginEventsFactory;
 import com.bgsoftware.superiorskyblock.core.formatting.Formatters;
 import com.bgsoftware.superiorskyblock.core.io.Files;
 import com.bgsoftware.superiorskyblock.core.logging.Debug;
@@ -31,7 +34,6 @@ import java.math.BigDecimal;
 import java.util.Collection;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -72,7 +74,7 @@ public enum Message {
     BORDER_PLAYER_COLOR_NAME_GREEN,
     BORDER_PLAYER_COLOR_NAME_RED,
     BORDER_PLAYER_COLOR_UPDATED,
-    BUILD_OUTSIDE_ISLAND,
+    BUILD_OUTSIDE_ISLAND(3, TimeUnit.SECONDS),
     CANNOT_SET_ROLE,
     CHANGED_BANK_LIMIT,
     CHANGED_BANK_LIMIT_ALL,
@@ -157,6 +159,7 @@ public enum Message {
     COMMAND_ARGUMENT_RATING("rating"),
     COMMAND_ARGUMENT_ROWS("rows"),
     COMMAND_ARGUMENT_SCHEMATIC_NAME("schematic-name"),
+    COMMAND_ARGUMENT_SCHEMATIC_SAVE_AIR("save-air"),
     COMMAND_ARGUMENT_SETTINGS("settings"),
     COMMAND_ARGUMENT_SIZE("size"),
     COMMAND_ARGUMENT_TIME("time"),
@@ -393,9 +396,9 @@ public enum Message {
 
                 IMessageComponent messageComponent = ComplexMessageComponent.of(baseComponents);
                 if (messageComponent != null) {
-                    EventResult<IMessageComponent> eventResult = plugin.getEventsBus().callSendMessageEvent(sender, name(), messageComponent, args);
-                    if (!eventResult.isCancelled())
-                        eventResult.getResult().sendMessage(sender, args);
+                    PluginEvent<PluginEventArgs.SendMessage> event = PluginEventsFactory.callSendMessageEvent(sender, name(), messageComponent, args);
+                    if (!event.isCancelled())
+                        event.getArgs().messageComponent.sendMessage(sender, args);
                 }
             }
         }
@@ -450,7 +453,9 @@ public enum Message {
     INVITE_ANNOUNCEMENT,
     INVITE_BANNED_PLAYER,
     INVITE_TO_FULL_ISLAND,
+    ISLAND_ALREADY_CLOSED,
     ISLAND_ALREADY_EXIST,
+    ISLAND_ALREADY_OPENED,
     ISLAND_BANK_EMPTY,
     ISLAND_BANK_SHOW,
     ISLAND_BANK_SHOW_OTHER,
@@ -807,8 +812,7 @@ public enum Message {
             Message.ISLAND_PROTECTED.send(sender, locale, args);
 
             SuperiorCommand bypassCommand = plugin.getCommands().getAdminCommand("bypass");
-
-            if (bypassCommand != null && sender.hasPermission(bypassCommand.getPermission()))
+            if (CommandsHelper.hasCommandAccess(bypassCommand, sender))
                 Message.ISLAND_PROTECTED_OPPED.send(sender, locale, args);
         }
     },
@@ -878,6 +882,8 @@ public enum Message {
             plugin.saveResource("lang/it-IT.yml", false);
             plugin.saveResource("lang/iw-IL.yml", false);
             plugin.saveResource("lang/pl-PL.yml", false);
+            plugin.saveResource("lang/pt-BR.yml", false);
+            plugin.saveResource("lang/ru-RU.yml", false);
             plugin.saveResource("lang/vi-VN.yml", false);
             plugin.saveResource("lang/zh-CN.yml", false);
         }
@@ -902,10 +908,9 @@ public enum Message {
                 PlayerLocales.setDefaultLocale(fileLocale);
 
             CommentedConfiguration cfg = CommentedConfiguration.loadConfiguration(langFile);
-            InputStream inputStream = plugin.getResource("lang/" + langFile.getName());
 
-            try {
-                cfg.syncWithConfig(langFile, inputStream == null ? plugin.getResource("lang/en-US.yml") : inputStream, "lang/en-US.yml");
+            try (InputStream langResourceStream = plugin.getResource("lang/" + langFile.getName())) {
+                cfg.syncWithConfig(langFile, langResourceStream == null ? plugin.getResource("lang/en-US.yml") : langResourceStream, "lang/en-US.yml");
             } catch (Exception error) {
                 Log.error(error, "An unexpected error occurred while saving lang file ", langFile.getName(), ":");
             }
@@ -941,19 +946,19 @@ public enum Message {
     }
 
     @Nullable
-    public String getMessage(Locale locale, Object... objects) {
-        return isEmpty(locale) ? defaultMessage : replaceArgs(messages.get(locale).getMessage(), objects).orElse(null);
+    public String getMessage(Locale locale, Object... args) {
+        return isEmpty(locale) ? defaultMessage : messages.get(locale).getMessage(args);
     }
 
     public final void send(SuperiorPlayer superiorPlayer, Object... args) {
-        if (plugin.getEventsBus().callAttemptPlayerSendMessageEvent(superiorPlayer, name(), args))
+        if (PluginEventsFactory.callAttemptPlayerSendMessageEvent(superiorPlayer, name(), args))
             superiorPlayer.runIfOnline(player -> send(player, superiorPlayer.getUserLocale(), args));
     }
 
     public final void send(CommandSender sender, Object... args) {
         if (sender instanceof Player) {
             SuperiorPlayer superiorPlayer = plugin.getPlayers().getSuperiorPlayer(sender);
-            if (!plugin.getEventsBus().callAttemptPlayerSendMessageEvent(superiorPlayer, name(), args))
+            if (!PluginEventsFactory.callAttemptPlayerSendMessageEvent(superiorPlayer, name(), args))
                 return;
         }
 
@@ -971,9 +976,9 @@ public enum Message {
                 return;
         }
 
-        EventResult<IMessageComponent> eventResult = plugin.getEventsBus().callSendMessageEvent(sender, name(), messageComponent, objects);
-        if (!eventResult.isCancelled()) {
-            eventResult.getResult().sendMessage(sender, objects);
+        PluginEvent<PluginEventArgs.SendMessage> event = PluginEventsFactory.callSendMessageEvent(sender, name(), messageComponent, objects);
+        if (!event.isCancelled()) {
+            event.getArgs().messageComponent.sendMessage(sender, objects);
             if (!(sender instanceof Player) && Log.isDebugged(Debug.SHOW_STACKTRACE)) {
                 Thread.dumpStack();
             }
@@ -992,19 +997,6 @@ public enum Message {
             dest.getParentFile().mkdirs();
             file.renameTo(dest);
         }
-    }
-
-    public static Optional<String> replaceArgs(String msg, Object... objects) {
-        if (Text.isBlank(msg))
-            return Optional.empty();
-
-        for (int i = 0; i < objects.length; i++) {
-            String objectString = objects[i] instanceof BigDecimal ?
-                    Formatters.NUMBER_FORMATTER.format((BigDecimal) objects[i]) : objects[i].toString();
-            msg = msg.replace("{" + i + "}", objectString);
-        }
-
-        return msg.isEmpty() ? Optional.empty() : Optional.of(msg);
     }
 
 }

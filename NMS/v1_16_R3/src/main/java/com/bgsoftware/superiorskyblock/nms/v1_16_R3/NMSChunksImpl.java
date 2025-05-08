@@ -11,13 +11,14 @@ import com.bgsoftware.superiorskyblock.core.ChunkPosition;
 import com.bgsoftware.superiorskyblock.core.Counter;
 import com.bgsoftware.superiorskyblock.core.collections.Chunk2ObjectMap;
 import com.bgsoftware.superiorskyblock.core.key.KeyIndicator;
-import com.bgsoftware.superiorskyblock.core.key.KeyMaps;
+import com.bgsoftware.superiorskyblock.core.key.map.KeyMaps;
 import com.bgsoftware.superiorskyblock.core.key.Keys;
 import com.bgsoftware.superiorskyblock.core.logging.Log;
 import com.bgsoftware.superiorskyblock.core.threads.BukkitExecutor;
 import com.bgsoftware.superiorskyblock.core.threads.Synchronized;
 import com.bgsoftware.superiorskyblock.nms.NMSChunks;
-import com.bgsoftware.superiorskyblock.nms.v1_16_R3.chunks.CropsTickingTileEntity;
+import com.bgsoftware.superiorskyblock.nms.v1_16_R3.crops.CropsTickingMethod;
+import com.bgsoftware.superiorskyblock.nms.v1_16_R3.crops.CropsTickingTileEntity;
 import com.bgsoftware.superiorskyblock.nms.v1_16_R3.world.KeyBlocksCache;
 import com.bgsoftware.superiorskyblock.world.BukkitEntities;
 import com.bgsoftware.superiorskyblock.world.generator.IslandsGenerator;
@@ -63,7 +64,6 @@ import org.bukkit.entity.Player;
 
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
@@ -83,6 +83,7 @@ public class NMSChunksImpl implements NMSChunks {
     public NMSChunksImpl(SuperiorSkyblockPlugin plugin) {
         this.plugin = plugin;
         KeyBlocksCache.cacheAllBlocks();
+        CropsTickingMethod.register();
     }
 
     @Override
@@ -151,11 +152,9 @@ public class NMSChunksImpl implements NMSChunks {
             @Override
             public void onLoadedChunk(Chunk chunk) {
                 Arrays.fill(chunk.getSections(), Chunk.a);
+
                 removeEntities(chunk);
-
-                new HashSet<>(chunk.tileEntities.keySet()).forEach(chunk.world::removeTileEntity);
-                chunk.tileEntities.clear();
-
+                removeTileEntities(chunk);
                 removeBlocks(chunk);
             }
 
@@ -240,7 +239,8 @@ public class NMSChunksImpl implements NMSChunks {
         NMSUtils.runActionOnChunks(chunkPositionsToCalculate, false, new NMSUtils.ChunkCallback() {
             @Override
             public void onLoadedChunk(Chunk chunk) {
-                ChunkPosition chunkPosition = ChunkPosition.of(chunk.getWorld().getWorld(), chunk.getPos().x, chunk.getPos().z);
+                ChunkPosition chunkPosition = ChunkPosition.of(chunk.getWorld().getWorld(),
+                        chunk.getPos().x, chunk.getPos().z, false);
                 allCalculatedChunks.add(calculateChunk(chunkPosition, chunk.getSections()));
             }
 
@@ -453,6 +453,11 @@ public class NMSChunksImpl implements NMSChunks {
                 entitySlices[i] = entitySliceCreationFunction.apply(null);
             }
         }
+    }
+
+    private static void removeTileEntities(Chunk chunk) {
+        new LinkedList<>(chunk.tileEntities.keySet()).forEach(chunk.world::removeTileEntity);
+        chunk.tileEntities.clear();
     }
 
     private static void removeBlocks(Chunk chunk) {

@@ -52,6 +52,7 @@ public class BukkitItems {
         }
     }
 
+    @Nullable
     public static PlayerHand getHand(Event event) {
         ReflectMethod<EquipmentSlot> reflectMethod;
 
@@ -67,15 +68,24 @@ public class BukkitItems {
 
         EquipmentSlot equipmentSlot = reflectMethod.isValid() ? reflectMethod.invoke(event) : EquipmentSlot.HAND;
 
-        return PlayerHand.of(equipmentSlot);
+        return equipmentSlot == null ? null : PlayerHand.of(equipmentSlot);
     }
 
-    public static ItemStack getHandItem(Player onlinePlayer, PlayerHand usedHand) {
-        if (usedHand == PlayerHand.OFF_HAND) {
-            return GET_ITEM_IN_OFF_HAND.invoke(onlinePlayer.getInventory());
+    @Nullable
+    public static ItemStack getHandItem(Player onlinePlayer, @Nullable PlayerHand usedHand) {
+        if (usedHand == null) {
+            return null;
         }
 
-        return onlinePlayer.getItemInHand();
+        ItemStack handItem;
+
+        if (usedHand == PlayerHand.OFF_HAND) {
+            handItem = GET_ITEM_IN_OFF_HAND.invoke(onlinePlayer.getInventory());
+        } else {
+            handItem = onlinePlayer.getItemInHand();
+        }
+
+        return handItem == null || handItem.getType() == Material.AIR ? null : handItem;
     }
 
     public static void setHandItem(Player player, PlayerHand playerHand, @Nullable ItemStack itemStack) {

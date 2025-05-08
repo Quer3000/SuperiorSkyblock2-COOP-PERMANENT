@@ -12,8 +12,7 @@ import com.bgsoftware.superiorskyblock.tag.StringTag;
 import com.bgsoftware.superiorskyblock.tag.Tag;
 import org.bukkit.Location;
 import org.bukkit.Material;
-import org.bukkit.entity.Entity;
-import org.bukkit.entity.Player;
+import org.bukkit.entity.EntityType;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -29,9 +28,9 @@ public class SchematicBuilder {
         return this;
     }
 
-    public SchematicBuilder withBlockType(Location location, Material blockType, int data) {
+    public SchematicBuilder withBlockType(Material blockType, int data) {
         if (ServerVersion.isLegacy()) {
-            compoundValue.put("combinedId", new IntTag(plugin.getNMSAlgorithms().getCombinedId(location)));
+            compoundValue.put("combinedId", new IntTag(plugin.getNMSAlgorithms().getCombinedId(blockType, (byte) data)));
         } else {
             compoundValue.put("type", new StringTag(blockType.name()));
             if (data != 0)
@@ -61,13 +60,10 @@ public class SchematicBuilder {
         return this;
     }
 
-    public SchematicBuilder applyEntity(Entity entity, Location min) {
-        if (!(entity instanceof Player)) {
-            Location offset = entity.getLocation().subtract(min);
-            compoundValue.put("entityType", new StringTag(entity.getType().name()));
-            compoundValue.put("offset", new StringTag(Serializers.LOCATION_SERIALIZER.serialize(offset)));
-            compoundValue.put("NBT", SchematicEntityFilter.filterNBTTag(plugin.getNMSTags().getNBTTag(entity)));
-        }
+    public SchematicBuilder applyEntity(EntityType entityType, CompoundTag entityTag, Location offset) {
+        compoundValue.put("offset", new StringTag(Serializers.LOCATION_SERIALIZER.serialize(offset)));
+        compoundValue.put("entityType", new StringTag(entityType.name()));
+        compoundValue.put("NBT", SchematicEntityFilter.filterNBTTag(entityTag));
         return this;
     }
 
